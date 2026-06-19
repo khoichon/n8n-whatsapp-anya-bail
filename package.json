@@ -1,0 +1,68 @@
+{
+  "name": "n8n-nodes-whatsapp-baileys",
+  "version": "1.0.0",
+  "description": "n8n community nodes for WhatsApp via anya-bail (@queenanya/baileys fork)",
+  "keywords": [
+    "n8n-community-node-package",
+    "whatsapp",
+    "baileys",
+    "automation"
+  ],
+  "license": "MIT",
+  "author": {
+    "name": "n8n-nodes-whatsapp-baileys"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/your-org/n8n-nodes-whatsapp-baileys.git"
+  },
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc && gulp build:icons",
+    "dev": "tsc --watch",
+    "format": "prettier nodes credentials --write",
+    "lint": "eslint nodes credentials --ext .ts",
+    "lintfix": "eslint nodes credentials --ext .ts --fix",
+    "prepublishOnly": "npm run build && npm run lint -c .eslintrc.prepublish.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "n8n": {
+    "n8nNodesApiVersion": 1,
+    "credentials": [
+      "dist/credentials/WhatsAppSession.credentials.js"
+    ],
+    "nodes": [
+      "dist/nodes/WhatsAppLogin/WhatsAppLogin.node.js",
+      "dist/nodes/WhatsAppSend/WhatsAppSend.node.js",
+      "dist/nodes/WhatsAppGroup/WhatsAppGroup.node.js",
+      "dist/nodes/WhatsAppProfile/WhatsAppProfile.node.js",
+      "dist/nodes/WhatsAppQuery/WhatsAppQuery.node.js",
+      "dist/nodes/WhatsAppTrigger/WhatsAppTrigger.node.js",
+      "dist/nodes/WhatsAppEvents/WhatsAppEvents.node.js",
+      "dist/nodes/WhatsAppRaw/WhatsAppRaw.node.js"
+    ]
+  },
+  "dependencies": {
+    "@hapi/boom": "^10.0.1",
+    "anya-bail": "*",
+    "n8n-workflow": "*",
+    "uqr": "^0.1.2"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@typescript-eslint/eslint-plugin": "^6.0.0",
+    "@typescript-eslint/parser": "^6.0.0",
+    "eslint": "^8.0.0",
+    "eslint-plugin-n8n-nodes-base": "^1.0.0",
+    "gulp": "^4.0.2",
+    "jest": "^29.0.0",
+    "prettier": "^3.0.0",
+    "ts-jest": "^29.0.0",
+    "typescript": "^5.0.0"
+  },
+  "peerDependencies": {
+    "n8n-workflow": "*"
+  }
+}

@@ -31,10 +31,7 @@ import type {
   EventSubscriber,
 } from './Types';
 import { sleep } from './Utils';
-let baileysversion: any;
-async () => {
-  baileysversion = await fetchLatestBaileysVersion();
-};
+
 export class SessionManager {
   
   private static instance: SessionManager;
@@ -178,6 +175,8 @@ export class SessionManager {
       require('./SessionStore').getSessionDir(sessionId),
     );
 
+    const { version } = await fetchLatestBaileysVersion();
+
     const sessionState = this._getOrCreateState(sessionId);
     sessionState.isReconnecting = false;
     sessionState.qrCode = undefined;
@@ -185,7 +184,7 @@ export class SessionManager {
 
     const sock = makeWASocket({
       auth: authState,
-      version:baileysversion,
+      version:version,
       printQRInTerminal: false,
       browser: DEFAULT_BROWSER,
       syncFullHistory: false,

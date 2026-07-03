@@ -5,6 +5,7 @@ import { Boom } from '@hapi/boom';
 import { loadOfficialBaileys } from './BaileysModuleLoader';
 import { BackendEventBus } from './BackendEventBus';
 import { makeSessionDirHelpers, JsonMetadataStore, generateQRImageFile, ensureDir } from './StorageKit';
+import { normalisePhoneForPairing } from '../Utils';
 import type { WAClientSocket } from './SocketInterface';
 import type { CreateSessionOptions, SessionInfo, WhatsAppEventName, EventSubscriber } from './Types';
 
@@ -225,15 +226,6 @@ export class OfficialSessionManager {
           /* non-critical */
         }
         log('info', sessionId, 'QR code generated');
-
-        if (usePairingCode && pairingPhone) {
-          try {
-            sessionState.pairingCode = await sock.requestPairingCode(pairingPhone);
-            log('info', sessionId, 'Pairing code generated');
-          } catch (e) {
-            log('error', sessionId, 'Failed to generate pairing code', (e as Error).message);
-          }
-        }
       }
 
       if (connection === 'open') {
@@ -308,6 +300,19 @@ export class OfficialSessionManager {
     ];
     for (const event of PASSTHROUGH_EVENTS) {
       sock.ev.on(event, (data: unknown) => sessionState.bus.publish(event, data));
+    }
+
+    // Pairing codes are requested directly over the freshly-created socket
+    // rather than waiting for a `qr` event: WhatsApp does not always emit
+    // one before the caller's polling window (see WhatsAppLogin node)
+    // elapses, which previously left `pairingCode` stuck at null.
+    if (usePairingCode && pairingPhone && !authState.creds?.registered) {
+      try {
+        sessionState.pairingCode = await sock.requestPairingCode(normalisePhoneForPairing(pairingPhone));
+        log('info', sessionId, 'Pairing code generated');
+      } catch (e) {
+        log('error', sessionId, 'Failed to generate pairing code', (e as Error).message);
+      }
     }
 
     log('info', sessionId, 'Session initialised');

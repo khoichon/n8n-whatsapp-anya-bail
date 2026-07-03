@@ -13,6 +13,17 @@ export function normaliseJid(input: string): string {
   return `${clean}@s.whatsapp.net`;
 }
 
+/**
+ * Normalise a user-supplied phone number for Baileys' `requestPairingCode()`.
+ * Baileys builds a JID directly from this string (`${digits}@s.whatsapp.net`),
+ * so a leading "+", spaces or dashes — all of which the WhatsApp Login node's
+ * "Phone Number" field explicitly invites via its `+1234567890` placeholder —
+ * produce an invalid JID and the pairing-code request silently fails.
+ */
+export function normalisePhoneForPairing(input: string): string {
+  return (input || '').replace(/[^0-9]/g, '');
+}
+
 export function normaliseGroupJid(input: string): string {
   if (!input) return '';
   if (input.includes('@g.us')) return input;

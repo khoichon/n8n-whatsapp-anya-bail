@@ -7,6 +7,7 @@
 
 import { SessionManager } from '../shared/SessionManager';
 import { MetadataStore } from '../shared/MetadataStore';
+import makeWASocket from 'anya-bail';
 
 jest.mock('anya-bail', () => ({
   __esModule: true,
@@ -18,10 +19,11 @@ jest.mock('anya-bail', () => ({
     user: { id: '1234567890:1@s.whatsapp.net', name: 'Test User' },
     logout: jest.fn(),
     end: jest.fn(),
+    requestPairingCode: jest.fn().mockResolvedValue('ABC-123'),
   })),
   DisconnectReason: { loggedOut: 401 },
   useMultiFileAuthState: jest.fn().mockResolvedValue({
-    state: {},
+    state: { creds: { registered: false } },
     saveCreds: jest.fn(),
   }),
   fetchLatestBaileysVersion: jest.fn().mockResolvedValue({ version: [2, 3000, 0], isLatest: true }),
@@ -113,6 +115,28 @@ describe('SessionManager', () => {
     const unsub = manager.subscribe('event-test', 'messages.upsert', handler);
     expect(typeof unsub).toBe('function');
     unsub();
+  });
+
+  it('requests a pairing code immediately, without waiting for a "qr" event', async () => {
+    const state = await manager.create({
+      sessionId: 'pairing-test',
+      usePairingCode: true,
+      pairingPhone: '+1 (234) 567-8900',
+    });
+
+    // The socket's connection.update handler (where the "qr" event would
+    // otherwise fire) is registered but never invoked in this test, yet
+    // the pairing code must already be available once create() resolves.
+    const socket = (makeWASocket as jest.Mock).mock.results.at(-1)!.value;
+    expect(socket.requestPairingCode).toHaveBeenCalledWith('12345678900');
+    expect(manager.getPairingCode('pairing-test')).toBe('ABC-123');
+    expect(state.pairingCode).toBe('ABC-123');
+  });
+
+  it('does not request a pairing code when usePairingCode is not set', async () => {
+    await manager.create({ sessionId: 'no-pairing-test' });
+    const socket = (makeWASocket as jest.Mock).mock.results.at(-1)!.value;
+    expect(socket.requestPairingCode).not.toHaveBeenCalled();
   });
 });
 

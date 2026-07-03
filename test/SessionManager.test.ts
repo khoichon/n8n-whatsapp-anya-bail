@@ -7,6 +7,7 @@
 
 import { SessionManager } from '../shared/SessionManager';
 import { MetadataStore } from '../shared/MetadataStore';
+import makeWASocket from 'anya-bail';
 
 jest.mock('anya-bail', () => ({
   __esModule: true,
@@ -18,10 +19,11 @@ jest.mock('anya-bail', () => ({
     user: { id: '1234567890:1@s.whatsapp.net', name: 'Test User' },
     logout: jest.fn(),
     end: jest.fn(),
+    requestPairingCode: jest.fn().mockResolvedValue('ABC-123'),
   })),
   DisconnectReason: { loggedOut: 401 },
   useMultiFileAuthState: jest.fn().mockResolvedValue({
-    state: {},
+    state: { creds: { registered: false } },
     saveCreds: jest.fn(),
   }),
   fetchLatestBaileysVersion: jest.fn().mockResolvedValue({ version: [2, 3000, 0], isLatest: true }),
@@ -113,6 +115,47 @@ describe('SessionManager', () => {
     const unsub = manager.subscribe('event-test', 'messages.upsert', handler);
     expect(typeof unsub).toBe('function');
     unsub();
+  });
+
+  it('requests a pairing code once a "qr" ref is received, using a digits-only phone number', async () => {
+    const state = await manager.create({
+      sessionId: 'pairing-test',
+      usePairingCode: true,
+      pairingPhone: '+1 (234) 567-8900',
+    });
+
+    const socket = (makeWASocket as jest.Mock).mock.results.at(-1)!.value;
+    const [, connectionUpdateHandler] = (socket.ev.on as jest.Mock).mock.calls.find(
+      ([event]: [string]) => event === 'connection.update',
+    )!;
+
+    // Simulate WhatsApp emitting the QR ref, which is what the pairing
+    // code request piggybacks on (see shared/SessionManager.ts).
+    await connectionUpdateHandler({ qr: 'test-qr-ref' });
+
+    expect(socket.requestPairingCode).toHaveBeenCalledWith('12345678900');
+    expect(manager.getPairingCode('pairing-test')).toBe('ABC-123');
+    expect(state.pairingCode).toBe('ABC-123');
+  });
+
+  it('does not request a pairing code before a "qr" ref has been received', async () => {
+    await manager.create({
+      sessionId: 'no-qr-yet-test',
+      usePairingCode: true,
+      pairingPhone: '1234567890',
+    });
+    const socket = (makeWASocket as jest.Mock).mock.results.at(-1)!.value;
+    expect(socket.requestPairingCode).not.toHaveBeenCalled();
+  });
+
+  it('does not request a pairing code when usePairingCode is not set', async () => {
+    await manager.create({ sessionId: 'no-pairing-test' });
+    const socket = (makeWASocket as jest.Mock).mock.results.at(-1)!.value;
+    const [, connectionUpdateHandler] = (socket.ev.on as jest.Mock).mock.calls.find(
+      ([event]: [string]) => event === 'connection.update',
+    )!;
+    await connectionUpdateHandler({ qr: 'test-qr-ref' });
+    expect(socket.requestPairingCode).not.toHaveBeenCalled();
   });
 });
 

@@ -30,7 +30,7 @@ import type {
   CreateSessionOptions,
   EventSubscriber,
 } from './Types';
-import { sleep } from './Utils';
+import { sleep, normalisePhoneForPairing } from './Utils';
 
 export class SessionManager {
   
@@ -213,9 +213,14 @@ export class SessionManager {
         } catch { /* non-critical */ }
         logger.info('QR code generated');
 
+        // Matches upstream Baileys' own reference usage (Example/example.ts):
+        // requestPairingCode() must be called after the socket has produced
+        // a `qr` ref (i.e. the handshake has completed) — calling it earlier
+        // throws "Connection Closed". The phone number must be digits only;
+        // WhatsApp rejects "+", spaces and dashes silently.
         if (usePairingCode && pairingPhone) {
           try {
-            const code = await sock.requestPairingCode(pairingPhone);
+            const code = await sock.requestPairingCode(normalisePhoneForPairing(pairingPhone));
             sessionState.pairingCode = code;
             logger.info('Pairing code generated', { code });
           } catch (e) {

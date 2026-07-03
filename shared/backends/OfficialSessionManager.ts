@@ -5,6 +5,7 @@ import { Boom } from '@hapi/boom';
 import { loadOfficialBaileys } from './BaileysModuleLoader';
 import { BackendEventBus } from './BackendEventBus';
 import { makeSessionDirHelpers, JsonMetadataStore, generateQRImageFile, ensureDir } from './StorageKit';
+import { normalisePhoneForPairing } from '../Utils';
 import type { WAClientSocket } from './SocketInterface';
 import type { CreateSessionOptions, SessionInfo, WhatsAppEventName, EventSubscriber } from './Types';
 
@@ -226,9 +227,14 @@ export class OfficialSessionManager {
         }
         log('info', sessionId, 'QR code generated');
 
+        // Matches upstream Baileys' own reference usage (Example/example.ts):
+        // requestPairingCode() must be called after the socket has produced
+        // a `qr` ref (i.e. the handshake has completed) — calling it earlier
+        // throws "Connection Closed". The phone number must be digits only;
+        // WhatsApp rejects "+", spaces and dashes silently.
         if (usePairingCode && pairingPhone) {
           try {
-            sessionState.pairingCode = await sock.requestPairingCode(pairingPhone);
+            sessionState.pairingCode = await sock.requestPairingCode(normalisePhoneForPairing(pairingPhone));
             log('info', sessionId, 'Pairing code generated');
           } catch (e) {
             log('error', sessionId, 'Failed to generate pairing code', (e as Error).message);

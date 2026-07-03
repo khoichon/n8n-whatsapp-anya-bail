@@ -117,25 +117,44 @@ describe('SessionManager', () => {
     unsub();
   });
 
-  it('requests a pairing code immediately, without waiting for a "qr" event', async () => {
+  it('requests a pairing code once a "qr" ref is received, using a digits-only phone number', async () => {
     const state = await manager.create({
       sessionId: 'pairing-test',
       usePairingCode: true,
       pairingPhone: '+1 (234) 567-8900',
     });
 
-    // The socket's connection.update handler (where the "qr" event would
-    // otherwise fire) is registered but never invoked in this test, yet
-    // the pairing code must already be available once create() resolves.
     const socket = (makeWASocket as jest.Mock).mock.results.at(-1)!.value;
+    const [, connectionUpdateHandler] = (socket.ev.on as jest.Mock).mock.calls.find(
+      ([event]: [string]) => event === 'connection.update',
+    )!;
+
+    // Simulate WhatsApp emitting the QR ref, which is what the pairing
+    // code request piggybacks on (see shared/SessionManager.ts).
+    await connectionUpdateHandler({ qr: 'test-qr-ref' });
+
     expect(socket.requestPairingCode).toHaveBeenCalledWith('12345678900');
     expect(manager.getPairingCode('pairing-test')).toBe('ABC-123');
     expect(state.pairingCode).toBe('ABC-123');
   });
 
+  it('does not request a pairing code before a "qr" ref has been received', async () => {
+    await manager.create({
+      sessionId: 'no-qr-yet-test',
+      usePairingCode: true,
+      pairingPhone: '1234567890',
+    });
+    const socket = (makeWASocket as jest.Mock).mock.results.at(-1)!.value;
+    expect(socket.requestPairingCode).not.toHaveBeenCalled();
+  });
+
   it('does not request a pairing code when usePairingCode is not set', async () => {
     await manager.create({ sessionId: 'no-pairing-test' });
     const socket = (makeWASocket as jest.Mock).mock.results.at(-1)!.value;
+    const [, connectionUpdateHandler] = (socket.ev.on as jest.Mock).mock.calls.find(
+      ([event]: [string]) => event === 'connection.update',
+    )!;
+    await connectionUpdateHandler({ qr: 'test-qr-ref' });
     expect(socket.requestPairingCode).not.toHaveBeenCalled();
   });
 });

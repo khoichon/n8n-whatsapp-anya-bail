@@ -212,6 +212,21 @@ export class SessionManager {
           sessionState.qrImagePath = await generateQRImage(qr, sessionId);
         } catch { /* non-critical */ }
         logger.info('QR code generated');
+
+        // Matches upstream Baileys' own reference usage (Example/example.ts):
+        // requestPairingCode() must be called after the socket has produced
+        // a `qr` ref (i.e. the handshake has completed) — calling it earlier
+        // throws "Connection Closed". The phone number must be digits only;
+        // WhatsApp rejects "+", spaces and dashes silently.
+        if (usePairingCode && pairingPhone) {
+          try {
+            const code = await sock.requestPairingCode(normalisePhoneForPairing(pairingPhone));
+            sessionState.pairingCode = code;
+            logger.info('Pairing code generated', { code });
+          } catch (e) {
+            logger.error('Failed to generate pairing code', e);
+          }
+        }
       }
 
       if (connection === 'open') {
@@ -273,20 +288,6 @@ export class SessionManager {
       sock.ev.on(event as never, (data: unknown) => {
         sessionState.bus?.publish(event, data);
       });
-    }
-
-    // Pairing codes are requested directly over the freshly-created socket
-    // rather than waiting for a `qr` event: WhatsApp does not always emit
-    // one before the caller's polling window (see WhatsAppLogin node)
-    // elapses, which previously left `pairingCode` stuck at null.
-    if (usePairingCode && pairingPhone && !authState.creds?.registered) {
-      try {
-        const code = await sock.requestPairingCode(normalisePhoneForPairing(pairingPhone));
-        sessionState.pairingCode = code;
-        logger.info('Pairing code generated', { code });
-      } catch (e) {
-        logger.error('Failed to generate pairing code', e);
-      }
     }
 
     logger.info('Session initialised');

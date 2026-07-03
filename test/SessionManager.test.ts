@@ -9,6 +9,7 @@ import { SessionManager } from '../shared/SessionManager';
 import { MetadataStore } from '../shared/MetadataStore';
 
 jest.mock('anya-bail', () => ({
+  __esModule: true,
   default: jest.fn(() => ({
     ev: {
       on: jest.fn(),
@@ -23,6 +24,7 @@ jest.mock('anya-bail', () => ({
     state: {},
     saveCreds: jest.fn(),
   }),
+  fetchLatestBaileysVersion: jest.fn().mockResolvedValue({ version: [2, 3000, 0], isLatest: true }),
 }));
 
 jest.mock('../shared/SessionStore', () => ({

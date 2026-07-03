@@ -6,9 +6,10 @@ import type {
 } from 'n8n-workflow';
 import { NodeOperationError } from 'n8n-workflow';
 
-import { SessionManager } from '../../shared/SessionManager';
 import * as GroupHelpers from '../../shared/GroupHelpers';
-import { normaliseGroupJid, sanitiseSessionId } from '../../shared/Utils';
+import { normaliseGroupJid } from '../../shared/Utils';
+import { resolveBackend, BACKEND_OVERRIDE_PROPERTY } from '../../shared/backends/BackendResolver';
+import { assertCapability } from '../../shared/backends/assertCapability';
 
 export class WhatsAppGroup implements INodeType {
   description: INodeTypeDescription = {
@@ -31,6 +32,7 @@ export class WhatsAppGroup implements INodeType {
         default: 'default',
         required: true,
       },
+      BACKEND_OVERRIDE_PROPERTY,
       {
         displayName: 'Operation',
         name: 'operation',
@@ -143,15 +145,15 @@ export class WhatsAppGroup implements INodeType {
 
   async execute(this: IExecuteFunctions): Promise<INodeExecutionData[][]> {
     const items = this.getInputData();
-    const manager = SessionManager.getInstance();
     const returnData: INodeExecutionData[] = [];
 
     for (let i = 0; i < items.length; i++) {
       const operation = this.getNodeParameter('operation', i) as string;
-      const sessionId = sanitiseSessionId(this.getNodeParameter('sessionId', i) as string);
 
       try {
-        const sock = manager.getOrThrow(sessionId);
+        const { backendId, backend, sessionId } = await resolveBackend(this, i);
+        assertCapability(this, backendId, backend.capabilities, 'groupManagement', i);
+        const sock = backend.getOrThrowSocket(sessionId);
 
         if (operation === 'getAll') {
           const groups = await GroupHelpers.getAllGroups(sock);

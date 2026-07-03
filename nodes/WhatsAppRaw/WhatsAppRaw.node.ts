@@ -7,8 +7,7 @@ import type {
 } from 'n8n-workflow';
 import { NodeOperationError } from 'n8n-workflow';
 
-import { SessionManager } from '../../shared/SessionManager';
-import { sanitiseSessionId } from '../../shared/Utils';
+import { resolveBackend, BACKEND_OVERRIDE_PROPERTY } from '../../shared/backends/BackendResolver';
 
 export class WhatsAppRaw implements INodeType {
   description: INodeTypeDescription = {
@@ -18,7 +17,7 @@ export class WhatsAppRaw implements INodeType {
     group: ['transform'],
     version: 1,
     description:
-      'Execute raw JavaScript against a WhatsApp socket. Access the full anya-bail API directly.',
+      'Execute raw JavaScript against a WhatsApp socket. Access the full anya-bail / official Baileys API directly, bypassing the capability registry.',
     defaults: { name: 'WhatsApp Raw' },
     inputs: ['main'],
     outputs: ['main'],
@@ -32,6 +31,7 @@ export class WhatsAppRaw implements INodeType {
         required: true,
         description: 'The WhatsApp session whose socket to use',
       },
+      BACKEND_OVERRIDE_PROPERTY,
       {
         displayName: 'JavaScript Code',
         name: 'code',
@@ -41,7 +41,12 @@ export class WhatsAppRaw implements INodeType {
           rows: 20,
         },
         default: `// Available variables:
-// sock     — the Baileys WASocket for this session
+// sock     — the WASocket for this session (anya-bail OR official baileys,
+//             depending on the Backend/Backend Override setting — this node
+//             intentionally bypasses the capability registry, so methods
+//             exclusive to one SDK (e.g. anya-bail's sendTable/ai flag)
+//             will throw "not a function" if called against the other)
+// backend  — 'legacy' | 'official', so you can branch in your code if needed
 // items    — the n8n input items array
 // helpers  — n8n helpers (getBinaryDataBuffer, etc.)
 // require  — Node.js require
@@ -72,22 +77,22 @@ return Object.values(groups);
 
   async execute(this: IExecuteFunctions): Promise<INodeExecutionData[][]> {
     const items = this.getInputData();
-    const manager = SessionManager.getInstance();
     const returnData: INodeExecutionData[] = [];
 
     for (let i = 0; i < items.length; i++) {
-      const sessionId = sanitiseSessionId(this.getNodeParameter('sessionId', i) as string);
       const code = this.getNodeParameter('code', i) as string;
       const wrapArray = this.getNodeParameter('wrapArray', i, true) as boolean;
 
       try {
-        const sock = manager.getOrThrow(sessionId);
+        const { backendId, backend, sessionId } = await resolveBackend(this, i);
+        const sock = backend.getOrThrowSocket(sessionId);
         const helpers = this.helpers;
 
         // Build and execute the async function with the user's code
         // eslint-disable-next-line @typescript-eslint/no-implied-eval
         const fn = new Function(
           'sock',
+          'backend',
           'items',
           'helpers',
           'require',
@@ -96,7 +101,7 @@ return Object.values(groups);
 
         let result: unknown;
         try {
-          result = await fn(sock, items, helpers, require);
+          result = await fn(sock, backendId, items, helpers, require);
         } catch (execErr) {
           throw new Error(`Code execution error: ${(execErr as Error).message}`);
         }

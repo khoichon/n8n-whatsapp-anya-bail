@@ -6,8 +6,9 @@ import type {
 } from 'n8n-workflow';
 import { NodeOperationError } from 'n8n-workflow';
 
-import { SessionManager } from '../../shared/SessionManager';
-import { normaliseJid, sanitiseSessionId } from '../../shared/Utils';
+import { normaliseJid } from '../../shared/Utils';
+import { resolveBackend, BACKEND_OVERRIDE_PROPERTY } from '../../shared/backends/BackendResolver';
+import { assertCapability } from '../../shared/backends/assertCapability';
 
 export class WhatsAppQuery implements INodeType {
   description: INodeTypeDescription = {
@@ -30,6 +31,7 @@ export class WhatsAppQuery implements INodeType {
         default: 'default',
         required: true,
       },
+      BACKEND_OVERRIDE_PROPERTY,
       {
         displayName: 'Operation',
         name: 'operation',
@@ -87,15 +89,19 @@ export class WhatsAppQuery implements INodeType {
 
   async execute(this: IExecuteFunctions): Promise<INodeExecutionData[][]> {
     const items = this.getInputData();
-    const manager = SessionManager.getInstance();
     const returnData: INodeExecutionData[] = [];
 
     for (let i = 0; i < items.length; i++) {
       const operation = this.getNodeParameter('operation', i) as string;
-      const sessionId = sanitiseSessionId(this.getNodeParameter('sessionId', i) as string);
 
       try {
-        const sock = manager.getOrThrow(sessionId);
+        const { backendId, backend, sessionId } = await resolveBackend(this, i);
+        const caps = backend.capabilities;
+        if (operation === 'getPrivacy') assertCapability(this, backendId, caps, 'privacySettings', i);
+        if (operation === 'getBlocklist') assertCapability(this, backendId, caps, 'blocklist', i);
+        if (operation === 'sendPresence') assertCapability(this, backendId, caps, 'presence', i);
+
+        const sock = backend.getOrThrowSocket(sessionId);
         let result: unknown;
 
         switch (operation) {
@@ -114,7 +120,6 @@ export class WhatsAppQuery implements INodeType {
           case 'getContact': {
             const raw = this.getNodeParameter('phoneOrJid', i) as string;
             const jid = normaliseJid(raw);
-            // fetchStatus returns USyncQueryResultList[] — access first element
             try {
               const statusResults = await sock.fetchStatus(jid);
               const first = Array.isArray(statusResults) ? statusResults[0] : statusResults;
@@ -126,13 +131,11 @@ export class WhatsAppQuery implements INodeType {
           }
 
           case 'getContacts': {
-            // contacts are not on the socket directly; return empty with note
             result = { contacts: [], note: 'Use a store plugin or WhatsApp Trigger contacts.update event to cache contacts.' };
             break;
           }
 
           case 'getChats': {
-            // chats are not on the socket directly; return empty with note
             result = { chats: [], note: 'Use a store plugin or WhatsApp Trigger chats.update event to cache chats.' };
             break;
           }
@@ -151,7 +154,7 @@ export class WhatsAppQuery implements INodeType {
 
           case 'getDevices': {
             const myJid = sock.user?.id ?? '';
-            result = await sock.getUSyncDevices([myJid], false, false);
+            result = await sock.getUSyncDevices?.([myJid], false, false);
             break;
           }
 
@@ -164,9 +167,9 @@ export class WhatsAppQuery implements INodeType {
             const type = this.getNodeParameter('presenceType', i) as string;
             const chatJid = this.getNodeParameter('presenceChatJid', i, '') as string;
             if (chatJid) {
-              await sock.sendPresenceUpdate(type as never, chatJid);
+              await sock.sendPresenceUpdate(type, chatJid);
             } else {
-              await sock.sendPresenceUpdate(type as never);
+              await sock.sendPresenceUpdate(type);
             }
             result = { success: true, presenceType: type };
             break;
@@ -176,7 +179,7 @@ export class WhatsAppQuery implements INodeType {
             throw new Error(`Unknown operation: ${operation}`);
         }
 
-        returnData.push({ json: { operation, ...(result as object) } });
+        returnData.push({ json: { operation, backend: backendId, ...(result as object) } });
       } catch (err) {
         if (this.continueOnFail()) {
           returnData.push({ json: { error: (err as Error).message }, pairedItem: i });

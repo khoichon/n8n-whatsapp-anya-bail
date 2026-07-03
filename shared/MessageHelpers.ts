@@ -1,26 +1,38 @@
-import type { AnyMessageContent, WASocket, WAMessage } from 'anya-bail';
 import { resolveMediaBuffer } from './Utils';
 import type { MediaInput } from './Types';
+import type { WAClientSocket as WASocket } from './backends/SocketInterface';
 
-export async function buildTextContent(text: string): Promise<AnyMessageContent> {
-  return { text };
+// `AnyMessageContent` / `WAMessage` are structural, backend-agnostic
+// stand-ins for the SDK-specific types of the same name in anya-bail /
+// baileys. Both SDKs accept/return objects with this shape, so keeping
+// this file decoupled from either SDK's type declarations lets it work
+// unmodified against whichever backend produced the socket.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export type AnyMessageContent = Record<string, any>;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export type WAMessage = Record<string, any>;
+
+export async function buildTextContent(text: string, mentions?: string[]): Promise<AnyMessageContent> {
+  return mentions?.length ? { text, mentions } : { text };
 }
 
 export async function buildImageContent(
   media: MediaInput,
   caption?: string,
+  mentions?: string[],
 ): Promise<AnyMessageContent> {
   const resolved = await resolveMediaBuffer(media.type, media.data);
   const imageSource = Buffer.isBuffer(resolved) ? { image: resolved } : { image: resolved };
-  return { ...imageSource, caption } as AnyMessageContent;
+  return { ...imageSource, caption, ...(mentions?.length ? { mentions } : {}) } as AnyMessageContent;
 }
 
 export async function buildVideoContent(
   media: MediaInput,
   caption?: string,
+  mentions?: string[],
 ): Promise<AnyMessageContent> {
   const resolved = await resolveMediaBuffer(media.type, media.data);
-  return { video: resolved as Buffer, caption } as AnyMessageContent;
+  return { video: resolved as Buffer, caption, ...(mentions?.length ? { mentions } : {}) } as AnyMessageContent;
 }
 
 export async function buildAudioContent(

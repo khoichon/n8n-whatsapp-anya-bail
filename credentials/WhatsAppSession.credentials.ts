@@ -6,6 +6,18 @@ export class WhatsAppSession implements ICredentialType {
   documentationUrl = 'https://github.com/your-org/n8n-nodes-whatsapp-baileys';
   properties: INodeProperties[] = [
     {
+      displayName: 'Backend',
+      name: 'backend',
+      type: 'options',
+      options: [
+        { name: 'Legacy (anya-bail)', value: 'legacy' },
+        { name: 'Official Baileys', value: 'official' },
+      ],
+      default: 'legacy',
+      description:
+        'Which WhatsApp SDK to connect through. Existing credentials default to "Legacy" so upgrading this package never changes behaviour unless you explicitly opt in to "Official Baileys" here.',
+    },
+    {
       displayName: 'Session ID',
       name: 'sessionId',
       type: 'string',

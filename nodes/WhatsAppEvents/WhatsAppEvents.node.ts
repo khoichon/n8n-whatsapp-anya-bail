@@ -6,9 +6,8 @@ import type {
 } from 'n8n-workflow';
 import { NodeOperationError } from 'n8n-workflow';
 
-import { SessionManager } from '../../shared/SessionManager';
-import { sanitiseSessionId } from '../../shared/Utils';
-import type { SupportedEvent } from '../../shared/Constants';
+import { resolveBackend, BACKEND_OVERRIDE_PROPERTY } from '../../shared/backends/BackendResolver';
+import type { WhatsAppEventName } from '../../shared/backends/Types';
 
 /**
  * WhatsAppEvents — synchronous node that subscribes to an event
@@ -36,6 +35,7 @@ export class WhatsAppEvents implements INodeType {
         default: 'default',
         required: true,
       },
+      BACKEND_OVERRIDE_PROPERTY,
       {
         displayName: 'Event',
         name: 'event',
@@ -44,6 +44,8 @@ export class WhatsAppEvents implements INodeType {
           { name: 'messages.upsert — Incoming Messages', value: 'messages.upsert' },
           { name: 'messages.update — Message Status Update', value: 'messages.update' },
           { name: 'messages.delete — Message Deleted', value: 'messages.delete' },
+          { name: 'messages.reaction — Reaction Received', value: 'messages.reaction' },
+          { name: 'message-receipt.update — Delivery/Read Receipt', value: 'message-receipt.update' },
           { name: 'groups.update — Group Updated', value: 'groups.update' },
           { name: 'group-participants.update — Participant Change', value: 'group-participants.update' },
           { name: 'presence.update — Presence Changed', value: 'presence.update' },
@@ -75,24 +77,24 @@ export class WhatsAppEvents implements INodeType {
 
   async execute(this: IExecuteFunctions): Promise<INodeExecutionData[][]> {
     const items = this.getInputData();
-    const manager = SessionManager.getInstance();
     const returnData: INodeExecutionData[] = [];
 
     for (let i = 0; i < items.length; i++) {
-      const sessionId = sanitiseSessionId(this.getNodeParameter('sessionId', i) as string);
-      const event = this.getNodeParameter('event', i) as SupportedEvent;
+      const event = this.getNodeParameter('event', i) as WhatsAppEventName;
       const timeoutSecs = this.getNodeParameter('timeout', i, 30) as number;
       const returnOnTimeout = this.getNodeParameter('returnOnTimeout', i, false) as boolean;
 
       try {
-        if (!manager.get(sessionId)) {
-          await manager.create({ sessionId });
+        const { backendId, backend, sessionId } = await resolveBackend(this, i);
+
+        if (!backend.getSocket(sessionId)) {
+          await backend.connect({ sessionId });
         }
 
         const data = await new Promise<unknown>((resolve, reject) => {
           let settled = false;
 
-          const unsub = manager.subscribe(sessionId, event, (eventData: unknown) => {
+          const unsub = backend.subscribe(sessionId, event, (eventData: unknown) => {
             if (settled) return;
             settled = true;
             unsub();
@@ -114,9 +116,9 @@ export class WhatsAppEvents implements INodeType {
         });
 
         if (data === null) {
-          returnData.push({ json: { event, timedOut: true, data: null } });
+          returnData.push({ json: { event, backend: backendId, timedOut: true, data: null } });
         } else {
-          returnData.push({ json: { event, timedOut: false, data, capturedAt: new Date().toISOString() } });
+          returnData.push({ json: { event, backend: backendId, timedOut: false, data, capturedAt: new Date().toISOString() } });
         }
       } catch (err) {
         if (this.continueOnFail()) {

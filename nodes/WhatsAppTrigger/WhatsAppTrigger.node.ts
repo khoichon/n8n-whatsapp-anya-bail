@@ -6,9 +6,8 @@ import type {
   IDataObject,
 } from 'n8n-workflow';
 
-import { SessionManager } from '../../shared/SessionManager';
-import { sanitiseSessionId } from '../../shared/Utils';
-import type { SupportedEvent } from '../../shared/Constants';
+import { resolveBackendForTrigger, BACKEND_OVERRIDE_PROPERTY } from '../../shared/backends/BackendResolver';
+import type { WhatsAppEventName } from '../../shared/backends/Types';
 
 export class WhatsAppTrigger implements INodeType {
   description: INodeTypeDescription = {
@@ -32,6 +31,7 @@ export class WhatsAppTrigger implements INodeType {
         required: true,
         description: 'The WhatsApp session to listen on',
       },
+      BACKEND_OVERRIDE_PROPERTY,
       {
         displayName: 'Trigger Mode',
         name: 'triggerMode',
@@ -41,6 +41,8 @@ export class WhatsAppTrigger implements INodeType {
           { name: 'Incoming Media', value: 'incomingMedia' },
           { name: 'Message Edited', value: 'messageEdited' },
           { name: 'Message Deleted', value: 'messageDeleted' },
+          { name: 'Message Reaction', value: 'messageReaction' },
+          { name: 'Message Receipt (Delivery/Read)', value: 'messageReceipt' },
           { name: 'Group Update', value: 'groupUpdate' },
           { name: 'Group Participant Change', value: 'groupParticipants' },
           { name: 'Presence Update', value: 'presence' },
@@ -57,7 +59,9 @@ export class WhatsAppTrigger implements INodeType {
         type: 'string',
         default: '',
         description: 'Only trigger for messages from/to this JID. Leave empty for all.',
-        displayOptions: { show: { triggerMode: ['incomingMessage', 'incomingMedia', 'messageEdited', 'messageDeleted'] } },
+        displayOptions: {
+          show: { triggerMode: ['incomingMessage', 'incomingMedia', 'messageEdited', 'messageDeleted', 'messageReaction', 'messageReceipt'] },
+        },
       },
       {
         displayName: 'Ignore Own Messages',
@@ -75,6 +79,8 @@ export class WhatsAppTrigger implements INodeType {
           { name: 'messages.upsert', value: 'messages.upsert' },
           { name: 'messages.update', value: 'messages.update' },
           { name: 'messages.delete', value: 'messages.delete' },
+          { name: 'message-receipt.update', value: 'message-receipt.update' },
+          { name: 'messages.reaction', value: 'messages.reaction' },
           { name: 'groups.update', value: 'groups.update' },
           { name: 'group-participants.update', value: 'group-participants.update' },
           { name: 'presence.update', value: 'presence.update' },
@@ -91,26 +97,29 @@ export class WhatsAppTrigger implements INodeType {
   };
 
   async trigger(this: ITriggerFunctions): Promise<ITriggerResponse> {
-    const sessionId = sanitiseSessionId(this.getNodeParameter('sessionId') as string);
-    const triggerMode = this.getNodeParameter('triggerMode') as string;
     const filterJid = this.getNodeParameter('filterJid', '') as string;
     const ignoreOwn = this.getNodeParameter('ignoreOwn', true) as boolean;
+    const triggerMode = this.getNodeParameter('triggerMode') as string;
 
-    const manager = SessionManager.getInstance();
+    const { backendId, backend, sessionId } = await resolveBackendForTrigger(this);
 
     // Ensure session exists
-    if (!manager.get(sessionId)) {
-      await manager.create({ sessionId });
+    if (!backend.getSocket(sessionId)) {
+      await backend.connect({ sessionId });
     }
 
     const unsubs: Array<() => void> = [];
 
     const emit = (data: unknown) => {
-      this.emit([[{ json: data as IDataObject }]]);
+      this.emit([[{ json: { ...(data as IDataObject), backend: backendId } }]]);
+    };
+
+    const sub = (event: WhatsAppEventName, handler: (data: unknown) => void) => {
+      unsubs.push(backend.subscribe(sessionId, event, handler));
     };
 
     if (triggerMode === 'incomingMessage' || triggerMode === 'incomingMedia') {
-      const unsub = manager.subscribe(sessionId, 'messages.upsert', (data: unknown) => {
+      sub('messages.upsert', (data: unknown) => {
         const payload = data as { messages: Array<{ key: { fromMe: boolean; remoteJid: string }; message: unknown }>; type: string };
         if (payload.type !== 'notify') return;
 
@@ -133,11 +142,10 @@ export class WhatsAppTrigger implements INodeType {
           emit({ event: 'messages.upsert', message: msg, timestamp: Date.now() });
         }
       });
-      unsubs.push(unsub);
     }
 
     if (triggerMode === 'messageEdited') {
-      const unsub = manager.subscribe(sessionId, 'messages.update', (data: unknown) => {
+      sub('messages.update', (data: unknown) => {
         const updates = data as Array<{ key: { remoteJid: string }; update: { message?: unknown } }>;
         for (const upd of updates) {
           if (filterJid && upd.key.remoteJid !== filterJid) continue;
@@ -146,61 +154,65 @@ export class WhatsAppTrigger implements INodeType {
           }
         }
       });
-      unsubs.push(unsub);
     }
 
     if (triggerMode === 'messageDeleted') {
-      const unsub = manager.subscribe(sessionId, 'messages.delete', (data: unknown) => {
-        const payload = data as { keys: Array<{ remoteJid: string }> };
-        for (const key of payload.keys) {
+      sub('messages.delete', (data: unknown) => {
+        const payload = data as { keys?: Array<{ remoteJid: string }> };
+        for (const key of payload.keys ?? []) {
           if (filterJid && key.remoteJid !== filterJid) continue;
           emit({ event: 'message.deleted', key, timestamp: Date.now() });
         }
       });
-      unsubs.push(unsub);
+    }
+
+    if (triggerMode === 'messageReaction') {
+      sub('messages.reaction', (data: unknown) => {
+        emit({ event: 'messages.reaction', data, timestamp: Date.now() });
+      });
+    }
+
+    if (triggerMode === 'messageReceipt') {
+      sub('message-receipt.update', (data: unknown) => {
+        emit({ event: 'message-receipt.update', data, timestamp: Date.now() });
+      });
     }
 
     if (triggerMode === 'groupUpdate') {
-      const unsub = manager.subscribe(sessionId, 'groups.update', (data: unknown) => {
+      sub('groups.update', (data: unknown) => {
         emit({ event: 'groups.update', updates: data, timestamp: Date.now() });
       });
-      unsubs.push(unsub);
     }
 
     if (triggerMode === 'groupParticipants') {
-      const unsub = manager.subscribe(sessionId, 'group-participants.update', (data: unknown) => {
+      sub('group-participants.update', (data: unknown) => {
         emit({ event: 'group-participants.update', data, timestamp: Date.now() });
       });
-      unsubs.push(unsub);
     }
 
     if (triggerMode === 'presence') {
-      const unsub = manager.subscribe(sessionId, 'presence.update', (data: unknown) => {
+      sub('presence.update', (data: unknown) => {
         emit({ event: 'presence.update', data, timestamp: Date.now() });
       });
-      unsubs.push(unsub);
     }
 
     if (triggerMode === 'call') {
-      const unsub = manager.subscribe(sessionId, 'call', (data: unknown) => {
+      sub('call', (data: unknown) => {
         emit({ event: 'call', calls: data, timestamp: Date.now() });
       });
-      unsubs.push(unsub);
     }
 
     if (triggerMode === 'connectionChange') {
-      const unsub = manager.subscribe(sessionId, 'connection.update', (data: unknown) => {
+      sub('connection.update', (data: unknown) => {
         emit({ event: 'connection.update', data, timestamp: Date.now() });
       });
-      unsubs.push(unsub);
     }
 
     if (triggerMode === 'any') {
-      const specificEvent = this.getNodeParameter('specificEvent', 'messages.upsert') as SupportedEvent;
-      const unsub = manager.subscribe(sessionId, specificEvent, (data: unknown) => {
+      const specificEvent = this.getNodeParameter('specificEvent', 'messages.upsert') as WhatsAppEventName;
+      sub(specificEvent, (data: unknown) => {
         emit({ event: specificEvent, data, timestamp: Date.now() });
       });
-      unsubs.push(unsub);
     }
 
     async function closeFunction() {

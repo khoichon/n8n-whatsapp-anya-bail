@@ -7,10 +7,9 @@ import type {
 } from 'n8n-workflow';
 import { NodeOperationError } from 'n8n-workflow';
 
-import { SessionManager } from '../../shared/SessionManager';
-import { generateQRBuffer } from '../../shared/QRGenerator';
-import { sanitiseSessionId } from '../../shared/Utils';
-import { sessionExists } from '../../shared/SessionStore';
+import { generateQRBuffer as legacyGenerateQRBuffer } from '../../shared/QRGenerator';
+import { generateQRBuffer as officialGenerateQRBuffer } from '../../shared/backends/StorageKit';
+import { resolveBackend, getBackendInstance, BACKEND_OVERRIDE_PROPERTY } from '../../shared/backends/BackendResolver';
 
 export class WhatsAppLogin implements INodeType {
   description: INodeTypeDescription = {
@@ -89,12 +88,17 @@ export class WhatsAppLogin implements INodeType {
           show: { operation: ['connect'] },
         },
       },
+      {
+        ...BACKEND_OVERRIDE_PROPERTY,
+        displayOptions: {
+          show: { operation: ['connect', 'pairingCode', 'status', 'disconnect', 'deleteSession'] },
+        },
+      },
     ],
   };
 
   async execute(this: IExecuteFunctions): Promise<INodeExecutionData[][]> {
     const items = this.getInputData();
-    const manager = SessionManager.getInstance();
     const returnData: INodeExecutionData[] = [];
 
     for (let i = 0; i < items.length; i++) {
@@ -102,23 +106,26 @@ export class WhatsAppLogin implements INodeType {
 
       try {
         if (operation === 'listSessions') {
-          const sessions = manager.listSessions();
-          returnData.push({ json: { sessions, count: sessions.length } });
+          // Not scoped to a single session — list across BOTH backends
+          // so nothing already-connected is hidden from the user.
+          const legacySessions = getBackendInstance('legacy').listSessions();
+          const officialSessions = getBackendInstance('official').listSessions();
+          const sessions = [...legacySessions, ...officialSessions];
+          returnData.push({ json: { sessions: sessions as unknown as IDataObject[], count: sessions.length } });
           continue;
         }
 
-        const rawSessionId = this.getNodeParameter('sessionId', i) as string;
-        const sessionId = sanitiseSessionId(rawSessionId);
+        const { backendId, backend, sessionId } = await resolveBackend(this, i);
 
         if (operation === 'status') {
-          const sessions = manager.listSessions();
-          const info = sessions.find(s => s.sessionId === sessionId);
+          const info = backend.getSessionInfo(sessionId);
           if (!info) {
             returnData.push({
               json: {
                 sessionId,
+                backend: backendId,
                 connected: false,
-                exists: sessionExists(sessionId),
+                exists: backend.sessionExistsOnDisk(sessionId),
                 message: 'Session not active in memory',
               },
             });
@@ -129,31 +136,30 @@ export class WhatsAppLogin implements INodeType {
         }
 
         if (operation === 'disconnect') {
-          await manager.disconnect(sessionId);
-          returnData.push({ json: { sessionId, disconnected: true } });
+          await backend.disconnect(sessionId);
+          returnData.push({ json: { sessionId, backend: backendId, disconnected: true } });
           continue;
         }
 
         if (operation === 'deleteSession') {
-          await manager.delete(sessionId);
-          returnData.push({ json: { sessionId, deleted: true } });
+          await backend.deleteSession(sessionId);
+          returnData.push({ json: { sessionId, backend: backendId, deleted: true } });
           continue;
         }
 
         if (operation === 'pairingCode') {
           const phone = this.getNodeParameter('pairingPhone', i) as string;
-          // Create session with pairing
-          await manager.create({ sessionId, usePairingCode: true, pairingPhone: phone });
-          // Wait up to 30s for code
+          await backend.connect({ sessionId, usePairingCode: true, pairingPhone: phone });
           let code: string | undefined;
           for (let t = 0; t < 30; t++) {
-            code = manager.getPairingCode(sessionId);
+            code = backend.getPairingCode(sessionId);
             if (code) break;
             await new Promise(r => setTimeout(r, 1000));
           }
           returnData.push({
             json: {
               sessionId,
+              backend: backendId,
               pairingCode: code ?? null,
               phone,
               message: code ? 'Enter this code in WhatsApp > Linked Devices > Link a Device' : 'Pairing code not yet generated',
@@ -166,26 +172,32 @@ export class WhatsAppLogin implements INodeType {
           const waitSecs = this.getNodeParameter('waitForQR', i, 30) as number;
           const includeImage = this.getNodeParameter('includeQRImage', i, true) as boolean;
 
-          await manager.create({ sessionId });
+          await backend.connect({ sessionId });
 
-          // Wait for QR or connected state
           let qr: string | undefined;
           let connected = false;
           const startMs = Date.now();
           const waitMs = waitSecs * 1000;
 
           while (Date.now() - startMs < waitMs) {
-            const info = manager.listSessions().find(s => s.sessionId === sessionId);
-            if (info?.connected) { connected = true; break; }
-            if (info?.qrCode) { qr = info.qrCode; break; }
+            const info = backend.getSessionInfo(sessionId);
+            if (info?.connected) {
+              connected = true;
+              break;
+            }
+            if (info?.qrCode) {
+              qr = info.qrCode;
+              break;
+            }
             await new Promise(r => setTimeout(r, 500));
           }
 
           if (connected) {
-            const info = manager.listSessions().find(s => s.sessionId === sessionId)!;
+            const info = backend.getSessionInfo(sessionId)!;
             returnData.push({
               json: {
                 sessionId,
+                backend: backendId,
                 connected: true,
                 phone: info.phone,
                 pushName: info.pushName,
@@ -198,6 +210,7 @@ export class WhatsAppLogin implements INodeType {
           const result: INodeExecutionData = {
             json: {
               sessionId,
+              backend: backendId,
               connected: false,
               qrCode: qr ?? null,
               message: qr ? 'Scan the QR code with WhatsApp' : 'QR code not yet available, check again shortly',
@@ -206,11 +219,13 @@ export class WhatsAppLogin implements INodeType {
 
           if (qr && includeImage) {
             try {
-              const qrBuf = await generateQRBuffer(qr);
+              const qrBuf = backendId === 'official' ? await officialGenerateQRBuffer(qr) : await legacyGenerateQRBuffer(qr);
               result.binary = {
                 qrImage: await this.helpers.prepareBinaryData(qrBuf, `qr_${sessionId}.bmp`, 'image/bmp'),
               };
-            } catch { /* non-critical */ }
+            } catch {
+              /* non-critical */
+            }
           }
 
           returnData.push(result);

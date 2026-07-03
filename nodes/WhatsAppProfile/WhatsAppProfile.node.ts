@@ -6,9 +6,10 @@ import type {
 } from 'n8n-workflow';
 import { NodeOperationError } from 'n8n-workflow';
 
-import { SessionManager } from '../../shared/SessionManager';
 import * as ProfileHelpers from '../../shared/ProfileHelpers';
-import { normaliseJid, sanitiseSessionId } from '../../shared/Utils';
+import { normaliseJid } from '../../shared/Utils';
+import { resolveBackend, BACKEND_OVERRIDE_PROPERTY } from '../../shared/backends/BackendResolver';
+import { assertCapability } from '../../shared/backends/assertCapability';
 
 export class WhatsAppProfile implements INodeType {
   description: INodeTypeDescription = {
@@ -31,6 +32,7 @@ export class WhatsAppProfile implements INodeType {
         default: 'default',
         required: true,
       },
+      BACKEND_OVERRIDE_PROPERTY,
       {
         displayName: 'Operation',
         name: 'operation',
@@ -108,15 +110,19 @@ export class WhatsAppProfile implements INodeType {
 
   async execute(this: IExecuteFunctions): Promise<INodeExecutionData[][]> {
     const items = this.getInputData();
-    const manager = SessionManager.getInstance();
     const returnData: INodeExecutionData[] = [];
 
     for (let i = 0; i < items.length; i++) {
       const operation = this.getNodeParameter('operation', i) as string;
-      const sessionId = sanitiseSessionId(this.getNodeParameter('sessionId', i) as string);
 
       try {
-        const sock = manager.getOrThrow(sessionId);
+        const { backendId, backend, sessionId } = await resolveBackend(this, i);
+        const caps = backend.capabilities;
+        if (operation === 'getBusiness') assertCapability(this, backendId, caps, 'businessProfile', i);
+        if (operation === 'getPrivacy' || operation === 'setPrivacy') assertCapability(this, backendId, caps, 'privacySettings', i);
+        if (operation === 'block' || operation === 'unblock') assertCapability(this, backendId, caps, 'blocklist', i);
+
+        const sock = backend.getOrThrowSocket(sessionId);
         let result: unknown;
 
         switch (operation) {
@@ -185,7 +191,7 @@ export class WhatsAppProfile implements INodeType {
             throw new Error(`Unknown operation: ${operation}`);
         }
 
-        returnData.push({ json: { operation, ...(result as object) } });
+        returnData.push({ json: { operation, backend: backendId, ...(result as object) } });
       } catch (err) {
         if (this.continueOnFail()) {
           returnData.push({ json: { error: (err as Error).message }, pairedItem: i });

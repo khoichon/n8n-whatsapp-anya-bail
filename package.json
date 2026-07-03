@@ -47,6 +47,7 @@
   "dependencies": {
     "@hapi/boom": "^10.0.1",
     "anya-bail": "*",
+    "baileys": "*",
     "n8n-workflow": "*",
     "uqr": "^0.1.2"
   },

@@ -1,4 +1,4 @@
-import type { WASocket } from 'anya-bail';
+import type { WAClientSocket as WASocket } from './backends/SocketInterface';
 import { normaliseJid } from './Utils';
 
 export async function getStatus(sock: WASocket, jid: string) {

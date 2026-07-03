@@ -6,7 +6,6 @@ import type {
 } from 'n8n-workflow';
 import { NodeOperationError } from 'n8n-workflow';
 
-import { SessionManager } from '../../shared/SessionManager';
 import {
   buildTextContent,
   buildImageContent,
@@ -20,10 +19,13 @@ import {
   buildButtonsContent,
   buildListContent,
   sendMessage,
+  type WAMessage,
 } from '../../shared/MessageHelpers';
-import { normaliseJid, normaliseGroupJid, isGroupJid, sanitiseSessionId } from '../../shared/Utils';
+import * as GroupHelpers from '../../shared/GroupHelpers';
+import { normaliseJid, normaliseGroupJid } from '../../shared/Utils';
 import type { MediaInput } from '../../shared/Types';
-import type { WAMessage } from 'anya-bail';
+import { resolveBackend, BACKEND_OVERRIDE_PROPERTY } from '../../shared/backends/BackendResolver';
+import { assertCapability } from '../../shared/backends/assertCapability';
 
 const MEDIA_TYPE_PROP = {
   displayName: 'Media Source',
@@ -60,6 +62,7 @@ export class WhatsAppSend implements INodeType {
         required: true,
         description: 'The WhatsApp session to use',
       },
+      BACKEND_OVERRIDE_PROPERTY,
       {
         displayName: 'Operation',
         name: 'operation',
@@ -111,6 +114,26 @@ export class WhatsAppSend implements INodeType {
         default: '',
         required: true,
         displayOptions: { show: { operation: ['text', 'editMessage'] } },
+      },
+
+      // ── Mentions ──
+      {
+        displayName: 'Mention Users',
+        name: 'mentionUsers',
+        type: 'string',
+        default: '',
+        placeholder: '+1234567890, +0987654321',
+        description:
+          'Comma-separated phone numbers to @mention. The numbers should also appear in the message text (e.g. "Hi @1234567890") for WhatsApp to render the mention — this field only controls who gets notified/highlighted.',
+        displayOptions: { show: { operation: ['text', 'image', 'video'] } },
+      },
+      {
+        displayName: 'Mention All Group Participants',
+        name: 'mentionAll',
+        type: 'boolean',
+        default: false,
+        description: 'Whether to @mention every participant of the destination group (ignored for non-group chats). Adds to, does not replace, "Mention Users".',
+        displayOptions: { show: { operation: ['text', 'image', 'video'] } },
       },
 
       // ── Image / Video ──
@@ -368,15 +391,23 @@ export class WhatsAppSend implements INodeType {
 
   async execute(this: IExecuteFunctions): Promise<INodeExecutionData[][]> {
     const items = this.getInputData();
-    const manager = SessionManager.getInstance();
     const returnData: INodeExecutionData[] = [];
 
     for (let i = 0; i < items.length; i++) {
       const operation = this.getNodeParameter('operation', i) as string;
-      const sessionId = sanitiseSessionId(this.getNodeParameter('sessionId', i) as string);
 
       try {
-        const sock = manager.getOrThrow(sessionId);
+        const { backendId, backend, sessionId } = await resolveBackend(this, i);
+        const capabilities = backend.capabilities;
+        const sock = backend.getOrThrowSocket(sessionId);
+
+        const MEDIA_OPS = new Set(['image', 'video', 'audio', 'voiceNote', 'document', 'sticker']);
+        if (MEDIA_OPS.has(operation)) assertCapability(this, backendId, capabilities, 'media', i);
+        if (operation === 'poll') assertCapability(this, backendId, capabilities, 'polls', i);
+        if (operation === 'reaction') assertCapability(this, backendId, capabilities, 'reactions', i);
+        if (operation === 'buttons') assertCapability(this, backendId, capabilities, 'buttons', i);
+        if (operation === 'list') assertCapability(this, backendId, capabilities, 'lists', i);
+        if (operation === 'editMessage') assertCapability(this, backendId, capabilities, 'editing', i);
 
         if (operation === 'deleteMessage') {
           const msgId = this.getNodeParameter('targetMessageId', i) as string;
@@ -395,7 +426,7 @@ export class WhatsAppSend implements INodeType {
           await sock.sendMessage(msgJid, {
             pin: { type: 1, time: duration },
             key: { id: msgId, remoteJid: msgJid, fromMe },
-          } as never);
+          });
           returnData.push({ json: { success: true, operation, messageId: msgId } });
           continue;
         }
@@ -407,23 +438,22 @@ export class WhatsAppSend implements INodeType {
           await sock.sendMessage(msgJid, {
             pin: { type: 2, time: 0 },
             key: { id: msgId, remoteJid: msgJid, fromMe },
-          } as never);
+          });
           returnData.push({ json: { success: true, operation, messageId: msgId } });
           continue;
         }
 
         const rawTo = this.getNodeParameter('to', i, '') as string;
-        const to = rawTo.includes('@g.us')
-          ? normaliseGroupJid(rawTo)
-          : normaliseJid(rawTo);
+        const to = rawTo.includes('@g.us') ? normaliseGroupJid(rawTo) : normaliseJid(rawTo);
 
         let content;
-        let sent;
+        let sent: WAMessage | undefined;
 
         switch (operation) {
           case 'text': {
             const text = this.getNodeParameter('text', i) as string;
-            content = await buildTextContent(text);
+            const mentions = await resolveMentions(this, i, sock, to);
+            content = await buildTextContent(text, mentions);
             sent = await sendMessage(sock, to, content);
             break;
           }
@@ -431,7 +461,8 @@ export class WhatsAppSend implements INodeType {
           case 'image': {
             const media = await resolveMedia(this, i, items);
             const caption = this.getNodeParameter('caption', i, '') as string;
-            content = await buildImageContent(media, caption || undefined);
+            const mentions = await resolveMentions(this, i, sock, to);
+            content = await buildImageContent(media, caption || undefined, mentions);
             sent = await sendMessage(sock, to, content);
             break;
           }
@@ -439,7 +470,8 @@ export class WhatsAppSend implements INodeType {
           case 'video': {
             const media = await resolveMedia(this, i, items);
             const caption = this.getNodeParameter('caption', i, '') as string;
-            content = await buildVideoContent(media, caption || undefined);
+            const mentions = await resolveMentions(this, i, sock, to);
+            content = await buildVideoContent(media, caption || undefined, mentions);
             sent = await sendMessage(sock, to, content);
             break;
           }
@@ -468,10 +500,8 @@ export class WhatsAppSend implements INodeType {
 
           case 'sticker': {
             const media = await resolveMedia(this, i, items);
-            const resolved = media.type === 'url'
-              ? { url: media.data as string }
-              : media.data as Buffer;
-            sent = await sock.sendMessage(to, { sticker: resolved } as never);
+            const resolved = media.type === 'url' ? { url: media.data as string } : (media.data as Buffer);
+            sent = await sock.sendMessage(to, { sticker: resolved });
             break;
           }
 
@@ -542,7 +572,7 @@ export class WhatsAppSend implements INodeType {
             sent = await sock.sendMessage(to, {
               edit: { id: msgId, remoteJid: msgJid, fromMe },
               text,
-            } as never);
+            });
             break;
           }
 
@@ -550,11 +580,9 @@ export class WhatsAppSend implements INodeType {
             const msgId = this.getNodeParameter('targetMessageId', i) as string;
             const fromMe = this.getNodeParameter('targetFromMe', i) as boolean;
             const forwardTo = normaliseJid(this.getNodeParameter('forwardTo', i) as string);
-            const msg: WAMessage = {
-              key: { id: msgId, remoteJid: to, fromMe },
-            } as WAMessage;
-            await sock.sendMessage(forwardTo, { forward: msg } as never);
-            sent = { key: { id: 'forwarded' } } as WAMessage;
+            const msg: WAMessage = { key: { id: msgId, remoteJid: to, fromMe } };
+            await sock.sendMessage(forwardTo, { forward: msg });
+            sent = { key: { id: 'forwarded' } };
             break;
           }
 
@@ -567,8 +595,9 @@ export class WhatsAppSend implements INodeType {
             success: true,
             operation,
             to,
-            messageId: (sent as WAMessage)?.key?.id ?? null,
-            timestamp: (sent as WAMessage)?.messageTimestamp ?? Date.now(),
+            backend: backendId,
+            messageId: sent?.key?.id ?? null,
+            timestamp: sent?.messageTimestamp ?? Date.now(),
           },
         });
       } catch (err) {
@@ -582,7 +611,37 @@ export class WhatsAppSend implements INodeType {
 
     return [returnData];
   }
+}
 
+async function resolveMentions(
+  ctx: IExecuteFunctions,
+  i: number,
+  sock: Parameters<typeof GroupHelpers.getGroupMetadata>[0],
+  to: string,
+): Promise<string[] | undefined> {
+  const explicitStr = ctx.getNodeParameter('mentionUsers', i, '') as string;
+  const mentionAll = ctx.getNodeParameter('mentionAll', i, false) as boolean;
+
+  const explicit = explicitStr
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean)
+    .map(normaliseJid);
+
+  let all: string[] = [];
+  if (mentionAll && to.endsWith('@g.us')) {
+    try {
+      const metadata = (await GroupHelpers.getGroupMetadata(sock, to)) as {
+        participants?: Array<{ id: string }>;
+      };
+      all = (metadata.participants ?? []).map(p => p.id);
+    } catch {
+      // Non-fatal: fall back to just the explicit list if metadata fetch fails.
+    }
+  }
+
+  const merged = Array.from(new Set([...explicit, ...all]));
+  return merged.length ? merged : undefined;
 }
 
 async function resolveMedia(

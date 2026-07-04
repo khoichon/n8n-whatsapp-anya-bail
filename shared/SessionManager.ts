@@ -1,378 +1,241 @@
-import makeWASocket, {
-  DisconnectReason,
-  useMultiFileAuthState,
-  type WASocket,
-  type ConnectionState,
-  fetchLatestBaileysVersion
-} from 'anya-bail';
-import { Boom } from '@hapi/boom';
+/**
+ * Unit tests for SessionManager.
+ * Run with: npx jest
+ *
+ * These tests mock anya-bail so no real WA connection is made.
+ */
 
-import { EventBus } from './EventBus';
-import { MetadataStore } from './MetadataStore';
-import { SessionLogger } from './Logger';
-import { generateQRImage } from './QRGenerator';
-import {
-  ensureSessionDir,
-  sessionExists,
-  listSessionIds,
-  deleteSessionFiles,
-} from './SessionStore';
-import {
-  RECONNECT_INTERVAL_MS,
-  MAX_RECONNECT_ATTEMPTS,
-  DEFAULT_BROWSER,
-  SUPPORTED_EVENTS,
-  type SupportedEvent,
-} from './Constants';
-import type {
-  SessionState,
-  SessionInfo,
-  CreateSessionOptions,
-  EventSubscriber,
-} from './Types';
-import { sleep, normalisePhoneForPairing } from './Utils';
+import { SessionManager } from '../shared/SessionManager';
+import { MetadataStore } from '../shared/MetadataStore';
+import makeWASocket from 'anya-bail';
 
-export class SessionManager {
-  
-  private static instance: SessionManager;
-  private sessions = new Map<string, SessionState>();
-  private metadata = MetadataStore.getInstance();
+jest.mock('anya-bail', () => ({
+  __esModule: true,
+  default: jest.fn(() => ({
+    ev: {
+      on: jest.fn(),
+      off: jest.fn(),
+    },
+    user: { id: '1234567890:1@s.whatsapp.net', name: 'Test User' },
+    logout: jest.fn(),
+    end: jest.fn(),
+    requestPairingCode: jest.fn().mockResolvedValue('ABC-123'),
+  })),
+  DisconnectReason: { loggedOut: 401 },
+  useMultiFileAuthState: jest.fn().mockResolvedValue({
+    state: { creds: { registered: false } },
+    saveCreds: jest.fn(),
+  }),
+  fetchLatestBaileysVersion: jest.fn().mockResolvedValue({ version: [2, 3000, 0], isLatest: true }),
+}));
 
-  private constructor() {}
+jest.mock('../shared/SessionStore', () => ({
+  getSessionDir: jest.fn(() => '/tmp/test-sessions/test'),
+  ensureSessionDir: jest.fn(),
+  sessionExists: jest.fn(() => false),
+  listSessionIds: jest.fn(() => []),
+  deleteSessionFiles: jest.fn(),
+}));
 
-  static getInstance(): SessionManager {
-    if (!SessionManager.instance) {
-      SessionManager.instance = new SessionManager();
-    }
-    return SessionManager.instance;
-  }
+jest.mock('../shared/MetadataStore', () => ({
+  MetadataStore: {
+    getInstance: jest.fn(() => ({
+      get: jest.fn(),
+      set: jest.fn(),
+      update: jest.fn(),
+      delete: jest.fn(),
+      listIds: jest.fn(() => []),
+      getAll: jest.fn(() => []),
+    })),
+  },
+}));
 
-  // ── Public API ──────────────────────────────────────────────────────────────
+jest.mock('../shared/QRGenerator', () => ({
+  generateQRImage: jest.fn().mockResolvedValue('/tmp/qr.png'),
+}));
 
-  async create(options: CreateSessionOptions): Promise<SessionState> {
-    const { sessionId, usePairingCode } = options;
+jest.mock('../shared/Logger', () => ({
+  SessionLogger: jest.fn().mockImplementation(() => ({
+    info: jest.fn(),
+    warn: jest.fn(),
+    error: jest.fn(),
+    debug: jest.fn(),
+  })),
+  rootLogger: { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() },
+}));
 
-    if (this.sessions.has(sessionId)) {
-      const existing = this.sessions.get(sessionId)!;
-      if (existing.socket !== null) {
-        if (!usePairingCode) return existing;
-        // Generating a pairing code always needs a brand-new socket and QR
-        // ref — reusing a cached connection would silently skip the whole
-        // request (no debug output, no error, nothing) and would ignore
-        // any new phone number the caller just supplied. Tear it down and
-        // reinitialize so re-requesting (e.g. with a different phone
-        // number) always starts a fresh handshake.
-        await this.disconnect(sessionId);
-      }
-      // Socket is null — re-connect
-    }
+describe('SessionManager', () => {
+  let manager: SessionManager;
 
-    return this._initSession(options);
-  }
+  beforeEach(() => {
+    // Reset singleton between tests
+    (SessionManager as unknown as { instance: undefined }).instance = undefined;
+    manager = SessionManager.getInstance();
+  });
 
-  get(sessionId: string): SessionState | undefined {
-    return this.sessions.get(sessionId);
-  }
+  it('should be a singleton', () => {
+    const m1 = SessionManager.getInstance();
+    const m2 = SessionManager.getInstance();
+    expect(m1).toBe(m2);
+  });
 
-  getSocket(sessionId: string): WASocket | null {
-    return this.sessions.get(sessionId)?.socket ?? null;
-  }
+  it('should return undefined for unknown session', () => {
+    expect(manager.get('nonexistent')).toBeUndefined();
+  });
 
-  getOrThrow(sessionId: string): WASocket {
-    const sock = this.getSocket(sessionId);
-    if (!sock) throw new Error(`Session "${sessionId}" is not connected.`);
-    return sock;
-  }
+  it('should return null socket for disconnected session', () => {
+    expect(manager.getSocket('nonexistent')).toBeNull();
+  });
 
-  async delete(sessionId: string): Promise<void> {
-    const state = this.sessions.get(sessionId);
-    if (state) {
-      this._clearReconnectTimer(state);
-      state.bus?.clearAll();
-      try { await state.socket?.logout(); } catch { /* ignore */ }
-      try { state.socket?.end(undefined); } catch { /* ignore */ }
-    }
-    this.sessions.delete(sessionId);
-    deleteSessionFiles(sessionId);
-    this.metadata.delete(sessionId);
-  }
+  it('should throw when getOrThrow called on missing session', () => {
+    expect(() => manager.getOrThrow('missing')).toThrow('Session "missing" is not connected');
+  });
 
-  async disconnect(sessionId: string): Promise<void> {
-    const state = this.sessions.get(sessionId);
-    if (!state) return;
-    this._clearReconnectTimer(state);
-    state.isReconnecting = false;
-    try { state.socket?.end(undefined); } catch { /* ignore */ }
-    state.socket = null;
-    this.metadata.update(sessionId, {
-      connected: false,
-      lastDisconnectedAt: new Date().toISOString(),
-    });
-  }
+  it('should create a session and return state', async () => {
+    const state = await manager.create({ sessionId: 'test-session' });
+    expect(state).toBeDefined();
+    expect(state.socket).not.toBeNull();
+  });
 
-  listSessions(): SessionInfo[] {
-    const allIds = new Set([
-      ...this.sessions.keys(),
-      ...this.metadata.listIds(),
-    ]);
-    return [...allIds].map(id => this._buildSessionInfo(id));
-  }
+  it('should return same socket for same session id', async () => {
+    const s1 = await manager.create({ sessionId: 'same-session' });
+    const s2 = await manager.create({ sessionId: 'same-session' });
+    expect(s1.socket).toBe(s2.socket);
+  });
 
-  getQR(sessionId: string): string | undefined {
-    return this.sessions.get(sessionId)?.qrCode;
-  }
+  it('should list sessions', async () => {
+    await manager.create({ sessionId: 'list-test' });
+    const list = manager.listSessions();
+    expect(Array.isArray(list)).toBe(true);
+  });
 
-  getQRImagePath(sessionId: string): string | undefined {
-    return this.sessions.get(sessionId)?.qrImagePath;
-  }
+  it('should subscribe and unsubscribe events', async () => {
+    await manager.create({ sessionId: 'event-test' });
+    const handler = jest.fn();
+    const unsub = manager.subscribe('event-test', 'messages.upsert', handler);
+    expect(typeof unsub).toBe('function');
+    unsub();
+  });
 
-  getPairingCode(sessionId: string): string | undefined {
-    return this.sessions.get(sessionId)?.pairingCode;
-  }
-
-  /** Rolling trail of pairing-code attempt events, for the node to surface
-   *  in its output JSON (visible in the n8n UI) when generation fails. */
-  getPairingDebug(sessionId: string): string[] {
-    return this.sessions.get(sessionId)?.pairingDebug ?? [];
-  }
-
-  private _debug(state: SessionState, message: string): void {
-    if (!state.pairingDebug) state.pairingDebug = [];
-    state.pairingDebug.push(`[${new Date().toISOString()}] ${message}`);
-    if (state.pairingDebug.length > 50) state.pairingDebug.shift();
-  }
-
-  subscribe(
-    sessionId: string,
-    event: SupportedEvent,
-    subscriber: EventSubscriber,
-  ): () => void {
-    const state = this._getOrCreateState(sessionId);
-    return state.bus.subscribe(event, subscriber);
-  }
-
-  async restoreAll(): Promise<void> {
-    const ids = listSessionIds();
-    for (const id of ids) {
-      if (sessionExists(id)) {
-        try {
-          await this.create({ sessionId: id });
-        } catch (err) {
-          new SessionLogger(id).error('restoreAll: failed to restore', err);
-        }
-      }
-    }
-  }
-
-  // ── Private helpers ─────────────────────────────────────────────────────────
-
-  private _getOrCreateState(sessionId: string): SessionState {
-    if (!this.sessions.has(sessionId)) {
-      const state: SessionState = {
-        socket: null,
-        metadata: {
-          sessionId,
-          connected: false,
-          createdAt: new Date().toISOString(),
-          reconnectAttempts: 0,
-        },
-        connectionState: {},
-        isReconnecting: false,
-        subscribers: new Map(),
-        bus: new EventBus(sessionId),
-        pairingDebug: [],
-      } as SessionState & { bus: EventBus };
-      this.sessions.set(sessionId, state);
-    }
-    return this.sessions.get(sessionId)!;
-  }
-
-  private async _initSession(options: CreateSessionOptions): Promise<SessionState> {
-    const { sessionId, pairingPhone, usePairingCode = false } = options;
-    const logger = new SessionLogger(sessionId);
-
-    ensureSessionDir(sessionId);
-
-    const { state: authState, saveCreds } = await useMultiFileAuthState(
-      require('./SessionStore').getSessionDir(sessionId),
-    );
-
-    const { version } = await fetchLatestBaileysVersion();
-
-    const sessionState = this._getOrCreateState(sessionId);
-    sessionState.isReconnecting = false;
-    sessionState.qrCode = undefined;
-    sessionState.pairingCode = undefined;
-    sessionState.pairingDebug = [];
-
-    if (usePairingCode) {
-      this._debug(
-        sessionState,
-        `connect() called with usePairingCode=true, phone="${pairingPhone ?? ''}", ` +
-          `creds.registered=${Boolean((authState as { creds?: { registered?: boolean } }).creds?.registered)}`,
-      );
-    }
-
-    const sock = makeWASocket({
-      auth: authState,
-      version:version,
-      printQRInTerminal: false,
-      browser: DEFAULT_BROWSER,
-      syncFullHistory: false,
-      generateHighQualityLinkPreview: true,
+  it('requests a pairing code once a "qr" ref is received, using a digits-only phone number', async () => {
+    const state = await manager.create({
+      sessionId: 'pairing-test',
+      usePairingCode: true,
+      pairingPhone: '+1 (234) 567-8900',
     });
 
-    sessionState.socket = sock;
-    this.metadata.update(sessionId, { sessionId, connected: false, createdAt: sessionState.metadata.createdAt, reconnectAttempts: 0 });
+    const socket = (makeWASocket as jest.Mock).mock.results.at(-1)!.value;
+    const [, connectionUpdateHandler] = (socket.ev.on as jest.Mock).mock.calls.find(
+      ([event]: [string]) => event === 'connection.update',
+    )!;
 
-    // Creds
-    sock.ev.on('creds.update', async () => {
-      await saveCreds();
-      sessionState.bus?.publish('creds.update', {});
+    // Simulate WhatsApp emitting the QR ref, which is what the pairing
+    // code request piggybacks on (see shared/SessionManager.ts).
+    await connectionUpdateHandler({ qr: 'test-qr-ref' });
+
+    expect(socket.requestPairingCode).toHaveBeenCalledWith('12345678900');
+    expect(manager.getPairingCode('pairing-test')).toBe('ABC-123');
+    expect(state.pairingCode).toBe('ABC-123');
+  });
+
+  it('does not request a pairing code before a "qr" ref has been received', async () => {
+    await manager.create({
+      sessionId: 'no-qr-yet-test',
+      usePairingCode: true,
+      pairingPhone: '1234567890',
+    });
+    const socket = (makeWASocket as jest.Mock).mock.results.at(-1)!.value;
+    expect(socket.requestPairingCode).not.toHaveBeenCalled();
+  });
+
+  it('does not request a pairing code when usePairingCode is not set', async () => {
+    await manager.create({ sessionId: 'no-pairing-test' });
+    const socket = (makeWASocket as jest.Mock).mock.results.at(-1)!.value;
+    const [, connectionUpdateHandler] = (socket.ev.on as jest.Mock).mock.calls.find(
+      ([event]: [string]) => event === 'connection.update',
+    )!;
+    await connectionUpdateHandler({ qr: 'test-qr-ref' });
+    expect(socket.requestPairingCode).not.toHaveBeenCalled();
+  });
+
+  it('requests a pairing code only once, even if the qr ref rotates again before pairing completes', async () => {
+    await manager.create({
+      sessionId: 'qr-rotation-test',
+      usePairingCode: true,
+      pairingPhone: '1234567890',
     });
 
-    // Connection state
-    sock.ev.on('connection.update', async (update: Partial<ConnectionState>) => {
-      const { connection, lastDisconnect, qr } = update;
-      Object.assign(sessionState.connectionState, update);
-      sessionState.bus?.publish('connection.update', update);
+    const socket = (makeWASocket as jest.Mock).mock.results.at(-1)!.value;
+    const [, connectionUpdateHandler] = (socket.ev.on as jest.Mock).mock.calls.find(
+      ([event]: [string]) => event === 'connection.update',
+    )!;
 
-      if (usePairingCode) {
-        const disconnectMsg = lastDisconnect?.error
-          ? ` lastDisconnect="${(lastDisconnect.error as Error).message}"`
-          : '';
-        this._debug(
-          sessionState,
-          `connection.update: connection="${connection ?? ''}" qr=${qr ? 'present' : 'none'}${disconnectMsg}`,
-        );
-      }
+    // First qr ref arrives — this is expected to trigger the request.
+    await connectionUpdateHandler({ qr: 'test-qr-ref-1' });
+    // WhatsApp rotates the ref again before the user has entered the code.
+    // This must NOT request a second code, which would silently invalidate
+    // the one already shown to the user.
+    await connectionUpdateHandler({ qr: 'test-qr-ref-2' });
+    await connectionUpdateHandler({ qr: 'test-qr-ref-3' });
 
-      if (qr) {
-        sessionState.qrCode = qr;
-        try {
-          sessionState.qrImagePath = await generateQRImage(qr, sessionId);
-        } catch { /* non-critical */ }
-        logger.info('QR code generated');
+    expect(socket.requestPairingCode).toHaveBeenCalledTimes(1);
+  });
 
-        // Matches upstream Baileys' own reference usage (Example/example.ts):
-        // requestPairingCode() must be called after the socket has produced
-        // a `qr` ref (i.e. the handshake has completed) — calling it earlier
-        // throws "Connection Closed". The phone number must be digits only;
-        // WhatsApp rejects "+", spaces and dashes silently.
-        if (usePairingCode && pairingPhone) {
-          const sanitisedPhone = normalisePhoneForPairing(pairingPhone);
-          this._debug(sessionState, `Requesting pairing code for phone="${sanitisedPhone}"`);
-          try {
-            const code = await sock.requestPairingCode(sanitisedPhone);
-            sessionState.pairingCode = code;
-            this._debug(sessionState, `Pairing code received: "${code}"`);
-            logger.info('Pairing code generated', { code });
-          } catch (e) {
-            this._debug(sessionState, `requestPairingCode() threw: ${(e as Error).message}`);
-            logger.error('Failed to generate pairing code', e);
-          }
-        }
-      }
+  it('starts a fresh socket for a repeated pairing-code request instead of reusing the cached one, so a changed phone number takes effect', async () => {
+    const first = await manager.create({
+      sessionId: 'restart-test',
+      usePairingCode: true,
+      pairingPhone: '1111111111',
+    });
+    // _initSession() mutates the cached state object in place, so capture
+    // the socket reference now — `first` and `second` below are the same
+    // object, and its `.socket` field is about to be swapped out.
+    const firstSocket = first.socket;
 
-      if (connection === 'open') {
-        sessionState.metadata.reconnectAttempts = 0;
-        sessionState.metadata.connected = true;
-        sessionState.metadata.phone = sock.user?.id?.split(':')[0] ?? sock.user?.id;
-        sessionState.metadata.pushName = sock.user?.name;
-        sessionState.metadata.lastConnectedAt = new Date().toISOString();
-        this.metadata.update(sessionId, sessionState.metadata);
-        logger.info('Connected', { phone: sessionState.metadata.phone });
-      }
-
-      if (connection === 'close') {
-        sessionState.metadata.connected = false;
-        sessionState.metadata.lastDisconnectedAt = new Date().toISOString();
-        this.metadata.update(sessionId, sessionState.metadata);
-
-        const err = lastDisconnect?.error as Boom | undefined;
-        const code = err?.output?.statusCode;
-        const loggedOut = code === DisconnectReason.loggedOut;
-
-        logger.warn('Connection closed', { code, loggedOut });
-
-        if (loggedOut) {
-          logger.info('Session logged out; clearing credentials');
-          deleteSessionFiles(sessionId);
-          sessionState.socket = null;
-          return;
-        }
-
-        const attempts = (sessionState.metadata.reconnectAttempts ?? 0) + 1;
-        sessionState.metadata.reconnectAttempts = attempts;
-        this.metadata.update(sessionId, { reconnectAttempts: attempts });
-
-        if (attempts <= MAX_RECONNECT_ATTEMPTS && !sessionState.isReconnecting) {
-          sessionState.isReconnecting = true;
-          const delay = RECONNECT_INTERVAL_MS * Math.min(attempts, 5);
-          logger.info(`Reconnecting in ${delay}ms (attempt ${attempts})`);
-
-          sessionState.reconnectTimer = setTimeout(async () => {
-            sessionState.isReconnecting = false;
-            if (this.sessions.has(sessionId)) {
-              try {
-                await this._initSession(options);
-              } catch (e) {
-                logger.error('Reconnect failed', e);
-              }
-            }
-          }, delay);
-        } else {
-          logger.error('Max reconnect attempts reached; giving up');
-        }
-      }
+    const second = await manager.create({
+      sessionId: 'restart-test',
+      usePairingCode: true,
+      pairingPhone: '2222222222',
     });
 
-    // Fan out all supported socket events to the EventBus
-    for (const event of SUPPORTED_EVENTS) {
-      if (event === 'connection.update' || event === 'creds.update') continue;
-      sock.ev.on(event as never, (data: unknown) => {
-        sessionState.bus?.publish(event, data);
-      });
-    }
+    // A brand-new socket was created rather than the first one being reused.
+    expect(second.socket).not.toBe(firstSocket);
 
-    logger.info('Session initialised');
-    return sessionState;
-  }
+    const socket = (makeWASocket as jest.Mock).mock.results.at(-1)!.value;
+    const [, connectionUpdateHandler] = (socket.ev.on as jest.Mock).mock.calls.find(
+      ([event]: [string]) => event === 'connection.update',
+    )!;
+    await connectionUpdateHandler({ qr: 'test-qr-ref' });
 
-  private _clearReconnectTimer(state: SessionState): void {
-    if (state.reconnectTimer) {
-      clearTimeout(state.reconnectTimer);
-      state.reconnectTimer = undefined;
-    }
-  }
+    // The second (latest) socket requests a code for the *new* phone number.
+    expect(socket.requestPairingCode).toHaveBeenCalledWith('2222222222');
+  });
+});
 
-  private _buildSessionInfo(sessionId: string): SessionInfo {
-    const state = this.sessions.get(sessionId);
-    const meta = this.metadata.get(sessionId) ?? {
-      sessionId,
-      connected: false,
-      createdAt: new Date().toISOString(),
-      reconnectAttempts: 0,
-    };
-    return {
-      sessionId,
-      phone: meta.phone,
-      pushName: meta.pushName,
-      connected: state?.socket !== null && (meta.connected ?? false),
-      hasQR: !!state?.qrCode,
-      hasPairingCode: !!state?.pairingCode,
-      qrCode: state?.qrCode,
-      pairingCode: state?.pairingCode,
-      reconnectAttempts: meta.reconnectAttempts ?? 0,
-      createdAt: meta.createdAt,
-      lastConnectedAt: meta.lastConnectedAt,
-    };
-  }
-}
+describe('EventBus', () => {
+  it('should fan out events to multiple subscribers', async () => {
+    const { EventBus } = await import('../shared/EventBus');
+    const bus = new EventBus('test');
+    const h1 = jest.fn();
+    const h2 = jest.fn();
 
-// Augment SessionState with bus
-declare module './Types' {
-  interface SessionState {
-    bus: EventBus;
-  }
-}
+    bus.subscribe('messages.upsert', h1);
+    bus.subscribe('messages.upsert', h2);
+    bus.publish('messages.upsert', { test: true });
+
+    expect(h1).toHaveBeenCalledWith({ test: true });
+    expect(h2).toHaveBeenCalledWith({ test: true });
+  });
+
+  it('should not call handler after unsubscribe', async () => {
+    const { EventBus } = await import('../shared/EventBus');
+    const bus = new EventBus('test2');
+    const handler = jest.fn();
+
+    const unsub = bus.subscribe('messages.upsert', handler);
+    unsub();
+    bus.publish('messages.upsert', { test: true });
+
+    expect(handler).not.toHaveBeenCalled();
+  });
+});

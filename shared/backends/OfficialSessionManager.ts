@@ -238,6 +238,8 @@ export class OfficialSessionManager {
       sessionState.bus.publish('creds.update', {});
     });
 
+    let pairingCodeRequested = false;
+
     sock.ev.on('connection.update', async (update: Record<string, unknown>) => {
       const { connection, lastDisconnect, qr } = update as {
         connection?: string;
@@ -270,7 +272,15 @@ export class OfficialSessionManager {
         // a `qr` ref (i.e. the handshake has completed) — calling it earlier
         // throws "Connection Closed". The phone number must be digits only;
         // WhatsApp rejects "+", spaces and dashes silently.
-        if (usePairingCode && pairingPhone) {
+        //
+        // WhatsApp rotates the qr ref periodically while unpaired, which
+        // re-fires this handler. Without `pairingCodeRequested`, each
+        // rotation would silently request ANOTHER code — invalidating
+        // whichever one the user was already typing into their phone,
+        // producing "Couldn't link device... or get a new code" even
+        // though the code shown to the user was never actually wrong.
+        if (usePairingCode && pairingPhone && !pairingCodeRequested) {
+          pairingCodeRequested = true;
           const sanitisedPhone = normalisePhoneForPairing(pairingPhone);
           this._debug(sessionState, `Requesting pairing code for phone="${sanitisedPhone}"`);
           try {
@@ -280,6 +290,9 @@ export class OfficialSessionManager {
           } catch (e) {
             this._debug(sessionState, `requestPairingCode() threw: ${(e as Error).message}`);
             log('error', sessionId, 'Failed to generate pairing code', (e as Error).message);
+            // Allow a retry on the next qr rotation, since this attempt
+            // never produced a code for the user to act on.
+            pairingCodeRequested = false;
           }
         }
       }

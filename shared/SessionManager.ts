@@ -50,11 +50,20 @@ export class SessionManager {
   // ── Public API ──────────────────────────────────────────────────────────────
 
   async create(options: CreateSessionOptions): Promise<SessionState> {
-    const { sessionId } = options;
+    const { sessionId, usePairingCode } = options;
 
     if (this.sessions.has(sessionId)) {
       const existing = this.sessions.get(sessionId)!;
-      if (existing.socket !== null) return existing;
+      if (existing.socket !== null) {
+        if (!usePairingCode) return existing;
+        // Generating a pairing code always needs a brand-new socket and QR
+        // ref — reusing a cached connection would silently skip the whole
+        // request (no debug output, no error, nothing) and would ignore
+        // any new phone number the caller just supplied. Tear it down and
+        // reinitialize so re-requesting (e.g. with a different phone
+        // number) always starts a fresh handshake.
+        await this.disconnect(sessionId);
+      }
       // Socket is null — re-connect
     }
 

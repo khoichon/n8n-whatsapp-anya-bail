@@ -79,7 +79,13 @@ export class OfficialSessionManager {
 
   async create(options: CreateSessionOptions): Promise<OfficialSessionState> {
     const existing = this.sessions.get(options.sessionId);
-    if (existing?.socket) return existing;
+    if (existing?.socket) {
+      if (!options.usePairingCode) return existing;
+      // See shared/SessionManager.ts create() for why pairing-code
+      // requests always force a fresh socket rather than reusing a
+      // cached one.
+      await this.disconnect(options.sessionId);
+    }
     return this._initSession(options);
   }
 

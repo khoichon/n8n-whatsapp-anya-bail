@@ -18,6 +18,11 @@ export interface SessionState {
   qrCode?: string;
   qrImagePath?: string;
   pairingCode?: string;
+  /** Rolling trail of what happened during the last pairing-code attempt,
+   *  surfaced by the WhatsApp Login node's "Generate Pairing Code"
+   *  operation so it's visible in the n8n UI without needing server log
+   *  access. */
+  pairingDebug?: string[];
   connectionState: Partial<ConnectionState>;
   reconnectTimer?: NodeJS.Timeout;
   isReconnecting: boolean;

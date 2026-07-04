@@ -40,6 +40,7 @@ interface OfficialSessionState {
   metadata: OfficialMetadata;
   qrCode?: string;
   pairingCode?: string;
+  pairingDebug?: string[];
   isReconnecting: boolean;
   reconnectTimer?: NodeJS.Timeout;
   bus: BackendEventBus;
@@ -144,6 +145,18 @@ export class OfficialSessionManager {
     return this.sessions.get(sessionId)?.pairingCode;
   }
 
+  /** Rolling trail of pairing-code attempt events, for the node to surface
+   *  in its output JSON (visible in the n8n UI) when generation fails. */
+  getPairingDebug(sessionId: string): string[] {
+    return this.sessions.get(sessionId)?.pairingDebug ?? [];
+  }
+
+  private _debug(state: OfficialSessionState, message: string): void {
+    if (!state.pairingDebug) state.pairingDebug = [];
+    state.pairingDebug.push(`[${new Date().toISOString()}] ${message}`);
+    if (state.pairingDebug.length > 50) state.pairingDebug.shift();
+  }
+
   subscribe(sessionId: string, event: WhatsAppEventName, subscriber: EventSubscriber): () => void {
     const state = this._getOrCreateState(sessionId);
     return state.bus.subscribe(event, subscriber);
@@ -192,6 +205,15 @@ export class OfficialSessionManager {
     sessionState.isReconnecting = false;
     sessionState.qrCode = undefined;
     sessionState.pairingCode = undefined;
+    sessionState.pairingDebug = [];
+
+    if (usePairingCode) {
+      this._debug(
+        sessionState,
+        `connect() called with usePairingCode=true, phone="${pairingPhone ?? ''}", ` +
+          `creds.registered=${Boolean((authState as { creds?: { registered?: boolean } }).creds?.registered)}`,
+      );
+    }
 
     const sock: WAClientSocket = baileys.default({
       auth: authState,
@@ -218,6 +240,16 @@ export class OfficialSessionManager {
       };
       sessionState.bus.publish('connection.update', update);
 
+      if (usePairingCode) {
+        const disconnectMsg = lastDisconnect?.error
+          ? ` lastDisconnect="${(lastDisconnect.error as Error).message}"`
+          : '';
+        this._debug(
+          sessionState,
+          `connection.update: connection="${connection ?? ''}" qr=${qr ? 'present' : 'none'}${disconnectMsg}`,
+        );
+      }
+
       if (qr) {
         sessionState.qrCode = qr;
         try {
@@ -233,10 +265,14 @@ export class OfficialSessionManager {
         // throws "Connection Closed". The phone number must be digits only;
         // WhatsApp rejects "+", spaces and dashes silently.
         if (usePairingCode && pairingPhone) {
+          const sanitisedPhone = normalisePhoneForPairing(pairingPhone);
+          this._debug(sessionState, `Requesting pairing code for phone="${sanitisedPhone}"`);
           try {
-            sessionState.pairingCode = await sock.requestPairingCode(normalisePhoneForPairing(pairingPhone));
+            sessionState.pairingCode = await sock.requestPairingCode(sanitisedPhone);
+            this._debug(sessionState, `Pairing code received: "${sessionState.pairingCode}"`);
             log('info', sessionId, 'Pairing code generated');
           } catch (e) {
+            this._debug(sessionState, `requestPairingCode() threw: ${(e as Error).message}`);
             log('error', sessionId, 'Failed to generate pairing code', (e as Error).message);
           }
         }

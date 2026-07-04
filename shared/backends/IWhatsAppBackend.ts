@@ -41,6 +41,11 @@ export interface IWhatsAppBackend {
   getQR(sessionId: string): string | undefined;
   getPairingCode(sessionId: string): string | undefined;
 
+  /** Rolling trail of pairing-code attempt events (connection.update
+   *  states, sanitised phone used, success/error), for surfacing in the
+   *  node's output JSON when generation fails or behaves unexpectedly. */
+  getPairingDebug(sessionId: string): string[];
+
   /** Whether persisted auth files exist on disk for this session (used by "Get Status"). */
   sessionExistsOnDisk(sessionId: string): boolean;
 

@@ -69,6 +69,10 @@ export class LegacyBackend implements IWhatsAppBackend {
     return this.manager.getPairingCode(sessionId);
   }
 
+  getPairingDebug(sessionId: string): string[] {
+    return this.manager.getPairingDebug(sessionId);
+  }
+
   subscribe(sessionId: string, event: WhatsAppEventName, subscriber: EventSubscriber): () => void {
     // The legacy SUPPORTED_EVENTS union is a subset of WhatsAppEventName;
     // events outside that subset simply never fire for this backend.

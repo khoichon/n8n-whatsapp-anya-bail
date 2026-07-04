@@ -121,6 +121,18 @@ export class SessionManager {
     return this.sessions.get(sessionId)?.pairingCode;
   }
 
+  /** Rolling trail of pairing-code attempt events, for the node to surface
+   *  in its output JSON (visible in the n8n UI) when generation fails. */
+  getPairingDebug(sessionId: string): string[] {
+    return this.sessions.get(sessionId)?.pairingDebug ?? [];
+  }
+
+  private _debug(state: SessionState, message: string): void {
+    if (!state.pairingDebug) state.pairingDebug = [];
+    state.pairingDebug.push(`[${new Date().toISOString()}] ${message}`);
+    if (state.pairingDebug.length > 50) state.pairingDebug.shift();
+  }
+
   subscribe(
     sessionId: string,
     event: SupportedEvent,
@@ -159,6 +171,7 @@ export class SessionManager {
         isReconnecting: false,
         subscribers: new Map(),
         bus: new EventBus(sessionId),
+        pairingDebug: [],
       } as SessionState & { bus: EventBus };
       this.sessions.set(sessionId, state);
     }
@@ -181,6 +194,15 @@ export class SessionManager {
     sessionState.isReconnecting = false;
     sessionState.qrCode = undefined;
     sessionState.pairingCode = undefined;
+    sessionState.pairingDebug = [];
+
+    if (usePairingCode) {
+      this._debug(
+        sessionState,
+        `connect() called with usePairingCode=true, phone="${pairingPhone ?? ''}", ` +
+          `creds.registered=${Boolean((authState as { creds?: { registered?: boolean } }).creds?.registered)}`,
+      );
+    }
 
     const sock = makeWASocket({
       auth: authState,
@@ -206,6 +228,16 @@ export class SessionManager {
       Object.assign(sessionState.connectionState, update);
       sessionState.bus?.publish('connection.update', update);
 
+      if (usePairingCode) {
+        const disconnectMsg = lastDisconnect?.error
+          ? ` lastDisconnect="${(lastDisconnect.error as Error).message}"`
+          : '';
+        this._debug(
+          sessionState,
+          `connection.update: connection="${connection ?? ''}" qr=${qr ? 'present' : 'none'}${disconnectMsg}`,
+        );
+      }
+
       if (qr) {
         sessionState.qrCode = qr;
         try {
@@ -219,11 +251,15 @@ export class SessionManager {
         // throws "Connection Closed". The phone number must be digits only;
         // WhatsApp rejects "+", spaces and dashes silently.
         if (usePairingCode && pairingPhone) {
+          const sanitisedPhone = normalisePhoneForPairing(pairingPhone);
+          this._debug(sessionState, `Requesting pairing code for phone="${sanitisedPhone}"`);
           try {
-            const code = await sock.requestPairingCode(normalisePhoneForPairing(pairingPhone));
+            const code = await sock.requestPairingCode(sanitisedPhone);
             sessionState.pairingCode = code;
+            this._debug(sessionState, `Pairing code received: "${code}"`);
             logger.info('Pairing code generated', { code });
           } catch (e) {
+            this._debug(sessionState, `requestPairingCode() threw: ${(e as Error).message}`);
             logger.error('Failed to generate pairing code', e);
           }
         }

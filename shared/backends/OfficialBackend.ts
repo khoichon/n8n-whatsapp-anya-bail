@@ -61,6 +61,10 @@ export class OfficialBackend implements IWhatsAppBackend {
     return this.manager.getPairingCode(sessionId);
   }
 
+  getPairingDebug(sessionId: string): string[] {
+    return this.manager.getPairingDebug(sessionId);
+  }
+
   subscribe(sessionId: string, event: WhatsAppEventName, subscriber: EventSubscriber): () => void {
     return this.manager.subscribe(sessionId, event, subscriber);
   }

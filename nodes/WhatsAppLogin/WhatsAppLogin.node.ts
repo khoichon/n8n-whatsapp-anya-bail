@@ -163,6 +163,10 @@ export class WhatsAppLogin implements INodeType {
               pairingCode: code ?? null,
               phone,
               message: code ? 'Enter this code in WhatsApp > Linked Devices > Link a Device' : 'Pairing code not yet generated',
+              // Visible in the n8n UI's output panel — shows exactly what
+              // the socket did (or didn't do) during this attempt, since
+              // server-side console/log output isn't reachable from there.
+              debug: backend.getPairingDebug(sessionId),
             },
           });
           continue;

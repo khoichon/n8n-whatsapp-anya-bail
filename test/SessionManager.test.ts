@@ -158,6 +158,29 @@ describe('SessionManager', () => {
     expect(socket.requestPairingCode).not.toHaveBeenCalled();
   });
 
+  it('requests a pairing code only once, even if the qr ref rotates again before pairing completes', async () => {
+    await manager.create({
+      sessionId: 'qr-rotation-test',
+      usePairingCode: true,
+      pairingPhone: '1234567890',
+    });
+
+    const socket = (makeWASocket as jest.Mock).mock.results.at(-1)!.value;
+    const [, connectionUpdateHandler] = (socket.ev.on as jest.Mock).mock.calls.find(
+      ([event]: [string]) => event === 'connection.update',
+    )!;
+
+    // First qr ref arrives — this is expected to trigger the request.
+    await connectionUpdateHandler({ qr: 'test-qr-ref-1' });
+    // WhatsApp rotates the ref again before the user has entered the code.
+    // This must NOT request a second code, which would silently invalidate
+    // the one already shown to the user.
+    await connectionUpdateHandler({ qr: 'test-qr-ref-2' });
+    await connectionUpdateHandler({ qr: 'test-qr-ref-3' });
+
+    expect(socket.requestPairingCode).toHaveBeenCalledTimes(1);
+  });
+
   it('starts a fresh socket for a repeated pairing-code request instead of reusing the cached one, so a changed phone number takes effect', async () => {
     const first = await manager.create({
       sessionId: 'restart-test',

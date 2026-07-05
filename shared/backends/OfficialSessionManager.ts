@@ -239,6 +239,8 @@ export class OfficialSessionManager {
     });
 
     let pairingCodeRequested = false;
+    let lastPairingCodeRequestTime = 0;
+    const PAIRING_CODE_REFRESH_INTERVAL_MS = 15000; // 15 seconds - allows refresh before QR expires
 
     sock.ev.on('connection.update', async (update: Record<string, unknown>) => {
       const { connection, lastDisconnect, qr } = update as {
@@ -273,26 +275,33 @@ export class OfficialSessionManager {
         // throws "Connection Closed". The phone number must be digits only;
         // WhatsApp rejects "+", spaces and dashes silently.
         //
-        // WhatsApp rotates the qr ref periodically while unpaired, which
-        // re-fires this handler. Without `pairingCodeRequested`, each
-        // rotation would silently request ANOTHER code — invalidating
-        // whichever one the user was already typing into their phone,
-        // producing "Couldn't link device... or get a new code" even
-        // though the code shown to the user was never actually wrong.
-        if (usePairingCode && pairingPhone && !pairingCodeRequested) {
-          pairingCodeRequested = true;
-          const sanitisedPhone = normalisePhoneForPairing(pairingPhone);
-          this._debug(sessionState, `Requesting pairing code for phone="${sanitisedPhone}"`);
-          try {
-            sessionState.pairingCode = await sock.requestPairingCode(sanitisedPhone);
-            this._debug(sessionState, `Pairing code received: "${sessionState.pairingCode}"`);
-            log('info', sessionId, 'Pairing code generated');
-          } catch (e) {
-            this._debug(sessionState, `requestPairingCode() threw: ${(e as Error).message}`);
-            log('error', sessionId, 'Failed to generate pairing code', (e as Error).message);
-            // Allow a retry on the next qr rotation, since this attempt
-            // never produced a code for the user to act on.
-            pairingCodeRequested = false;
+        // WhatsApp rotates the qr ref periodically (~15-20 seconds) while unpaired.
+        // Pairing codes are tied to specific QR refs and become invalid when QR rotates.
+        // We now allow refreshing the pairing code on QR rotation after a minimum interval,
+        // ensuring users always get a valid code without spamming requests on every rotation.
+        if (usePairingCode && pairingPhone) {
+          const now = Date.now();
+          const timeSinceLastRequest = now - lastPairingCodeRequestTime;
+          const shouldRequestCode = !pairingCodeRequested || timeSinceLastRequest > PAIRING_CODE_REFRESH_INTERVAL_MS;
+
+          if (shouldRequestCode) {
+            pairingCodeRequested = true;
+            lastPairingCodeRequestTime = now;
+            const sanitisedPhone = normalisePhoneForPairing(pairingPhone);
+            this._debug(sessionState, `Requesting pairing code for phone="${sanitisedPhone}" (time since last: ${timeSinceLastRequest}ms)`);
+            try {
+              sessionState.pairingCode = await sock.requestPairingCode(sanitisedPhone);
+              this._debug(sessionState, `Pairing code received: "${sessionState.pairingCode}"`);
+              log('info', sessionId, 'Pairing code generated', { code: sessionState.pairingCode });
+            } catch (e) {
+              this._debug(sessionState, `requestPairingCode() threw: ${(e as Error).message}`);
+              log('error', sessionId, 'Failed to generate pairing code', (e as Error).message);
+              // Allow a retry on the next qr rotation, since this attempt
+              // never produced a code for the user to act on.
+              pairingCodeRequested = false;
+            }
+          } else {
+            this._debug(sessionState, `QR rotated but skipping pairing code request (too soon: ${timeSinceLastRequest}ms)`);
           }
         }
       }

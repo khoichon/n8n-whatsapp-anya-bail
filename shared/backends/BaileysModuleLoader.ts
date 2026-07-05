@@ -26,11 +26,11 @@ export function loadOfficialBaileys(): Promise<BaileysModule> {
     const dynamicImport = new Function('specifier', 'return import(specifier)') as (
       specifier: string,
     ) => Promise<BaileysModule>;
-    cached = dynamicImport('baileys').catch(err => {
+    cached = dynamicImport('@whiskeysockets/baileys').catch(err => {
       cached = undefined; // allow retry on next call instead of caching a permanent failure
       throw new Error(
-        `Failed to load the official "baileys" package. Make sure it is installed ` +
-          `alongside this node package (npm install baileys). Original error: ${
+        `Failed to load the official "@whiskeysockets/baileys" package. Make sure it is installed ` +
+          `alongside this node package (npm install @whiskeysockets/baileys). Original error: ${
             (err as Error).message
           }`,
       );

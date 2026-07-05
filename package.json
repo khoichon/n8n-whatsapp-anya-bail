@@ -46,8 +46,8 @@
   },
   "dependencies": {
     "@hapi/boom": "^10.0.1",
+    "@whiskeysockets/baileys": "^6.6.0",
     "anya-bail": "*",
-    "baileys": "*",
     "n8n-workflow": "*",
     "uqr": "^0.1.2"
   },

@@ -233,7 +233,7 @@ export class SessionManager {
 
     let pairingCodeRequested = false;
     let lastPairingCodeRequestTime = 0;
-    const PAIRING_CODE_REFRESH_INTERVAL_MS = 15000; // 15 seconds - allows refresh before QR expires
+    const PAIRING_CODE_REFRESH_INTERVAL_MS = 30000; // 30 seconds - conservative to avoid socket interference
 
     // Connection state
     sock.ev.on('connection.update', async (update: Partial<ConnectionState>) => {

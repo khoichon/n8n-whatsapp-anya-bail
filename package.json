@@ -23,7 +23,8 @@
     "format": "prettier nodes credentials --write",
     "lint": "eslint nodes credentials --ext .ts",
     "lintfix": "eslint nodes credentials --ext .ts --fix",
-    "prepublishOnly": "npm run build && npm run lint -c .eslintrc.prepublish.js"
+    "prepublishOnly": "npm run build && npm run lint -c .eslintrc.prepublish.js",
+    "test": "jest"
   },
   "files": [
     "dist"
@@ -46,7 +47,7 @@
   },
   "dependencies": {
     "@hapi/boom": "^10.0.1",
-    "@whiskeysockets/baileys": "^6.6.0",
+    "@whiskeysockets/baileys": "^7.0.0-rc10",
     "anya-bail": "*",
     "n8n-workflow": "*",
     "uqr": "^0.1.2"

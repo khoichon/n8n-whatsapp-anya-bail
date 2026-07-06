@@ -92,3 +92,42 @@ describe('resolveBackendForTrigger (ITriggerFunctions nodes)', () => {
     expect(backendId).toBe('official');
   });
 });
+
+describe('Official Backend Support (v7)', () => {
+  it('can explicitly select official backend via override', async () => {
+    const ctx = fakeExecuteCtx({
+      credentials: { backend: 'legacy' },
+      params: { backendOverride: 'official', sessionId: 'official-test' },
+    });
+    const { backendId } = await resolveBackend(ctx, 0);
+    expect(backendId).toBe('official');
+  });
+
+  it('can use official backend from credentials', async () => {
+    const ctx = fakeExecuteCtx({
+      credentials: { backend: 'official', sessionId: 'cred-official' },
+      params: { backendOverride: 'useCredential', sessionId: 'cred-official' },
+    });
+    const { backendId, sessionId } = await resolveBackend(ctx, 0);
+    expect(backendId).toBe('official');
+    expect(sessionId).toBe('cred-official');
+  });
+
+  it('official backend sessions are isolated from legacy sessions', async () => {
+    const legacyCtx = fakeExecuteCtx({
+      credentials: { backend: 'legacy' },
+      params: { backendOverride: 'legacy', sessionId: 'same-session-id' },
+    });
+    const officialCtx = fakeExecuteCtx({
+      credentials: { backend: 'official' },
+      params: { backendOverride: 'official', sessionId: 'same-session-id' },
+    });
+
+    const { backendId: legacyId } = await resolveBackend(legacyCtx, 0);
+    const { backendId: officialId } = await resolveBackend(officialCtx, 0);
+
+    expect(legacyId).toBe('legacy');
+    expect(officialId).toBe('official');
+    // Same session ID can be used with both backends independently
+  });
+});

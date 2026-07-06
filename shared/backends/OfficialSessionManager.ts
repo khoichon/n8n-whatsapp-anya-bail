@@ -366,6 +366,7 @@ export class OfficialSessionManager {
       'group-participants.update',
       'call',
       'blocklist.update',
+      'lid-mapping.update', // Baileys v7+ LID/PN mapping updates
     ];
     for (const event of PASSTHROUGH_EVENTS) {
       sock.ev.on(event, (data: unknown) => sessionState.bus.publish(event, data));

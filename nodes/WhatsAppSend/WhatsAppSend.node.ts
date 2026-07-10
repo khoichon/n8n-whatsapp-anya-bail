@@ -372,6 +372,14 @@ export class WhatsAppSend implements INodeType {
         default: '',
         displayOptions: { show: { operation: ['forward'] } },
       },
+      // ── Delete ──
+      { 
+        displayName: 'Target Participant',
+        name:'targetParticipantId', 
+        type:'string', 
+        default:'', 
+        description:'The person who sent the target message to be deleted', 
+        displayOptions: { show: { operation: ['deleteMessage'] } }, },
 
       // ── Pin duration ──
       {
@@ -413,7 +421,8 @@ export class WhatsAppSend implements INodeType {
           const msgId = this.getNodeParameter('targetMessageId', i) as string;
           const msgJid = this.getNodeParameter('targetMessageJid', i) as string;
           const fromMe = this.getNodeParameter('targetFromMe', i) as boolean;
-          await sock.sendMessage(msgJid, { delete: { id: msgId, remoteJid: msgJid, fromMe } });
+          const participant = this.getNodeParameter('targetParticipantId') as string;
+          await sock.sendMessage(msgJid, { delete: { id: msgId, remoteJid: msgJid, participant, fromMe } });
           returnData.push({ json: { success: true, operation, messageId: msgId } });
           continue;
         }

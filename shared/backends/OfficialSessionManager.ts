@@ -19,7 +19,7 @@ const METADATA_FILE = path.join(BASE_DIR, 'metadata.json');
 
 const RECONNECT_INTERVAL_MS = 5000;
 const MAX_RECONNECT_ATTEMPTS = 10;
-const DEFAULT_BROWSER: [string, string, string] = ['n8n-baileys-official', 'Chrome', '120.0.0'];
+const DEFAULT_BROWSER: [string, string, string] = ['Chrome', 'Windows', '10.0'];
 
 const { getSessionDir, ensureSessionDir, sessionExists, listSessionIds, deleteSessionFiles } =
   makeSessionDirHelpers(SESSIONS_DIR);
@@ -33,6 +33,10 @@ interface OfficialMetadata {
   lastConnectedAt?: string;
   lastDisconnectedAt?: string;
   reconnectAttempts: number;
+  /** Authentication method: 'qr' or 'pairing' */
+  authMethod?: 'qr' | 'pairing';
+  /** Phone number for pairing code authentication (digits only) */
+  pairingPhone?: string;
 }
 
 interface OfficialSessionState {
@@ -169,13 +173,38 @@ export class OfficialSessionManager {
   }
 
   async restoreAll(): Promise<void> {
-    for (const id of listSessionIds()) {
+    const ids = listSessionIds();
+    log('info', 'SYSTEM', `restoreAll: found ${ids.length} session directories: ${ids.join(', ')}`);
+
+    for (const id of ids) {
       if (sessionExists(id)) {
         try {
-          await this.create({ sessionId: id });
+          log('info', 'SYSTEM', `restoreAll: processing session "${id}"`);
+
+          // Load saved authentication preferences from metadata
+          const meta = this.metadata.get(id);
+          log('info', id, `restoreAll: metadata=${meta ? 'found' : 'missing'}, authMethod=${meta?.authMethod}`);
+
+          if (meta && (meta.authMethod === 'pairing' || meta.authMethod === 'qr')) {
+            // Auto-login with saved authentication preferences
+            log('info', id, `restoreAll: creating session with authMethod=${meta.authMethod}, pairingPhone=${meta.pairingPhone}`);
+            await this.create({
+              sessionId: id,
+              usePairingCode: meta.authMethod === 'pairing',
+              pairingPhone: meta.pairingPhone,
+            });
+            log('info', id, 'restoreAll: session created successfully');
+          }
+          // If no auth preferences saved, skip auto-login
+          // The WhatsAppLogin node will create the session on-demand using current credential settings
+          else {
+            log('info', id, `restoreAll: skipping auto-login (no valid auth preferences)`);
+          }
         } catch (err) {
           log('error', id, 'restoreAll: failed to restore', (err as Error).message);
         }
+      } else {
+        log('info', 'SYSTEM', `restoreAll: session "${id}" has no files on disk, skipping`);
       }
     }
   }
@@ -203,21 +232,56 @@ export class OfficialSessionManager {
     const { sessionId, pairingPhone, usePairingCode = false } = options;
     ensureSessionDir(sessionId);
 
+    const sessionState = this._getOrCreateState(sessionId);
+
+    // Clear any existing reconnect timer before creating new session
+    this._clearReconnectTimer(sessionState);
+
+    // Properly disconnect existing socket if any
+    if (sessionState.socket) {
+      try {
+        sessionState.socket.end(undefined);
+      } catch {
+        /* ignore */
+      }
+      sessionState.socket = null;
+    }
+
     const baileys = await loadOfficialBaileys();
     const { state: authState, saveCreds } = await baileys.useMultiFileAuthState(getSessionDir(sessionId));
     const { version } = await baileys.fetchLatestBaileysVersion();
 
-    const sessionState = this._getOrCreateState(sessionId);
     sessionState.isReconnecting = false;
     sessionState.qrCode = undefined;
     sessionState.pairingCode = undefined;
     sessionState.pairingDebug = [];
 
+    // Check if credentials already exist and have essential crypto material
+    // Even if registered=false, sessions with noiseKey and pairingEphemeralKeyPair
+    // may be able to connect without going through QR/pairing code again
+    const creds = (authState as { creds?: { registered?: boolean; user?: string; noiseKey?: any; pairingEphemeralKeyPair?: any } }).creds;
+    const hasExistingAuth = creds && (
+      creds.registered === true ||
+      (creds.user && typeof creds.user === 'string') ||
+      (creds.noiseKey && creds.pairingEphemeralKeyPair) // Has essential crypto material
+    );
+
+    // Use pairing code only for new sessions, not for already-authenticated sessions
+    const shouldUsePairingCode = usePairingCode && !hasExistingAuth;
+
+    // Save authentication preferences to metadata for auto-initialization on boot
+    const authMethod = shouldUsePairingCode ? 'pairing' : 'qr';
+    this.metadata.update(sessionId, {
+      authMethod,
+      pairingPhone: shouldUsePairingCode ? pairingPhone : undefined,
+    });
+
     if (usePairingCode) {
       this._debug(
         sessionState,
-        `connect() called with usePairingCode=true, phone="${pairingPhone ?? ''}", ` +
-          `creds.registered=${Boolean((authState as { creds?: { registered?: boolean } }).creds?.registered)}`,
+        `connect() called with usePairingCode=${usePairingCode}, shouldUsePairingCode=${shouldUsePairingCode}, ` +
+          `phone="${pairingPhone ?? ''}", creds.registered=${Boolean(creds?.registered)}, ` +
+          `hasExistingAuth=${hasExistingAuth}`,
       );
     }
 
@@ -259,13 +323,16 @@ export class OfficialSessionManager {
       }
 
       if (qr) {
-        sessionState.qrCode = qr;
-        try {
-          await generateQRImageFile(qr, sessionId, QR_CACHE_DIR);
-        } catch {
-          /* non-critical */
+        // In pairing code mode, don't save QR code - only request pairing code
+        if (!shouldUsePairingCode) {
+          sessionState.qrCode = qr;
+          try {
+            await generateQRImageFile(qr, sessionId, QR_CACHE_DIR);
+          } catch {
+            /* non-critical */
+          }
+          log('info', sessionId, 'QR code generated');
         }
-        log('info', sessionId, 'QR code generated');
 
         // Matches upstream Baileys' own reference usage (Example/example.ts):
         // requestPairingCode() must be called after the socket has produced
@@ -279,7 +346,7 @@ export class OfficialSessionManager {
         // producing "Couldn't link device... or get a new code" even though the
         // user was entering a perfectly valid code. Users must enter the code
         // within ~20 seconds before the QR rotates naturally.
-        if (usePairingCode && pairingPhone && !pairingCodeRequested) {
+        if (shouldUsePairingCode && pairingPhone && !pairingCodeRequested) {
           pairingCodeRequested = true;
           const sanitisedPhone = normalisePhoneForPairing(pairingPhone);
           this._debug(sessionState, `Requesting pairing code for phone="${sanitisedPhone}"`);
@@ -337,6 +404,16 @@ export class OfficialSessionManager {
             sessionState.isReconnecting = false;
             if (this.sessions.has(sessionId)) {
               try {
+                // Properly disconnect old socket before creating new one
+                const oldState = this.sessions.get(sessionId);
+                if (oldState?.socket) {
+                  try {
+                    oldState.socket.end(undefined);
+                  } catch {
+                    /* ignore */
+                  }
+                  oldState.socket = null;
+                }
                 await this._initSession(options);
               } catch (e) {
                 log('error', sessionId, 'Reconnect failed', (e as Error).message);

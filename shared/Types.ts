@@ -10,6 +10,10 @@ export interface SessionMetadata {
   lastConnectedAt?: string;
   lastDisconnectedAt?: string;
   reconnectAttempts: number;
+  /** Authentication method: 'qr' or 'pairing' */
+  authMethod?: 'qr' | 'pairing';
+  /** Phone number for pairing code authentication (digits only) */
+  pairingPhone?: string;
 }
 
 export interface SessionState {

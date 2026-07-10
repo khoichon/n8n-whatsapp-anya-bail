@@ -634,7 +634,9 @@ async function resolveMentions(
       const metadata = (await GroupHelpers.getGroupMetadata(sock, to)) as {
         participants?: Array<{ id: string }>;
       };
-      all = (metadata.participants ?? []).map(p => p.id);
+      all = (metadata.participants ?? [])
+        .filter(p => p?.id)
+        .map(p => p.id);
     } catch {
       // Non-fatal: fall back to just the explicit list if metadata fetch fails.
     }

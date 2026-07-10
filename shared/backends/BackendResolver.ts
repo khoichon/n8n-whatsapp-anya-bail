@@ -37,28 +37,32 @@ export interface ResolvedBackend {
   backendId: BackendId;
   backend: IWhatsAppBackend;
   sessionId: string;
+  authMethod: 'qr' | 'pairing';
+  pairingPhone?: string;
 }
 
 async function readCredentialBackend(
   getCredentials: (name: string) => Promise<IDataObject | undefined>,
-): Promise<{ backend: BackendId; sessionId?: string }> {
+): Promise<{ backend: BackendId; sessionId?: string; authMethod?: 'qr' | 'pairing'; pairingPhone?: string }> {
   try {
     const creds = await getCredentials('whatsAppSession');
     if (creds) {
       return {
         backend: creds.backend === 'official' ? 'official' : 'legacy',
         sessionId: typeof creds.sessionId === 'string' && creds.sessionId ? creds.sessionId : undefined,
+        authMethod: creds.authMethod === 'pairing' ? 'pairing' : 'qr',
+        pairingPhone: typeof creds.pairingPhone === 'string' ? creds.pairingPhone : undefined,
       };
     }
   } catch {
     // Credential not attached/required on this node — fall back to defaults.
   }
-  return { backend: 'legacy' };
+  return { backend: 'legacy', authMethod: 'qr', pairingPhone: undefined };
 }
 
 /** For IExecuteFunctions-based nodes (Send, Group, Profile, Query, Login). */
 export async function resolveBackend(ctx: IExecuteFunctions, itemIndex: number): Promise<ResolvedBackend> {
-  const { backend: credentialBackend, sessionId: credSessionId } = await readCredentialBackend(
+  const { backend: credentialBackend, sessionId: credSessionId, authMethod, pairingPhone } = await readCredentialBackend(
     name => ctx.getCredentials(name) as Promise<IDataObject | undefined>,
   );
 
@@ -80,12 +84,12 @@ export async function resolveBackend(ctx: IExecuteFunctions, itemIndex: number):
   }
 
   const sessionId = sanitiseSessionId(rawSessionId);
-  return { backendId, backend: getBackendInstance(backendId), sessionId };
+  return { backendId, backend: getBackendInstance(backendId), sessionId, authMethod: authMethod ?? 'qr', pairingPhone };
 }
 
 /** For ITriggerFunctions-based nodes (Trigger, Events). */
 export async function resolveBackendForTrigger(ctx: ITriggerFunctions): Promise<ResolvedBackend> {
-  const { backend: credentialBackend, sessionId: credSessionId } = await readCredentialBackend(
+  const { backend: credentialBackend, sessionId: credSessionId, authMethod, pairingPhone } = await readCredentialBackend(
     name => ctx.getCredentials(name) as Promise<IDataObject | undefined>,
   );
 
@@ -107,7 +111,7 @@ export async function resolveBackendForTrigger(ctx: ITriggerFunctions): Promise<
   }
 
   const sessionId = sanitiseSessionId(rawSessionId);
-  return { backendId, backend: getBackendInstance(backendId), sessionId };
+  return { backendId, backend: getBackendInstance(backendId), sessionId, authMethod: authMethod ?? 'qr', pairingPhone };
 }
 
 /** Shared "Backend Override" node property — add to every node's properties array. */

@@ -7,6 +7,9 @@ import type {
 } from 'n8n-workflow';
 import { NodeOperationError } from 'n8n-workflow';
 
+// Bootstrap sessions on node load
+import '../../shared/Bootstrap';
+
 import { generateQRBuffer as legacyGenerateQRBuffer } from '../../shared/QRGenerator';
 import { generateQRBuffer as officialGenerateQRBuffer } from '../../shared/backends/StorageKit';
 import { resolveBackend, getBackendInstance, BACKEND_OVERRIDE_PROPERTY } from '../../shared/backends/BackendResolver';
@@ -36,14 +39,14 @@ export class WhatsAppLogin implements INodeType {
         type: 'options',
         noDataExpression: true,
         options: [
-          { name: 'Connect / Get QR', value: 'connect', description: 'Start a session and retrieve the QR code or pairing code' },
-          { name: 'Generate Pairing Code', value: 'pairingCode', description: 'Generate a pairing code for phone-number-based auth' },
-          { name: 'Get Status', value: 'status', description: 'Get the current connection status of a session' },
+          { name: 'Connect', value: 'connect', description: 'Connect or reconnect a session using existing credentials' },
+          { name: 'Get Code / Status', value: 'getCode', description: 'Get the current QR code or pairing code (auto-generated on boot)' },
+          { name: 'Get Detailed Status', value: 'status', description: 'Get the current connection status of a session' },
           { name: 'List Sessions', value: 'listSessions', description: 'List all known WhatsApp sessions' },
           { name: 'Disconnect', value: 'disconnect', description: 'Disconnect a session without deleting credentials' },
           { name: 'Delete Session', value: 'deleteSession', description: 'Disconnect and permanently delete all session data' },
         ],
-        default: 'connect',
+        default: 'getCode',
       },
       {
         displayName: 'Session ID',
@@ -53,19 +56,7 @@ export class WhatsAppLogin implements INodeType {
         required: true,
         description: 'Unique name for this WhatsApp session',
         displayOptions: {
-          show: { operation: ['connect', 'pairingCode', 'status', 'disconnect', 'deleteSession'] },
-        },
-      },
-      {
-        displayName: 'Phone Number',
-        name: 'pairingPhone',
-        type: 'string',
-        default: '',
-        placeholder: '+1234567890',
-        required: true,
-        description: 'Phone number in international format for pairing code generation',
-        displayOptions: {
-          show: { operation: ['pairingCode'] },
+          show: { operation: ['getCode', 'status', 'connect', 'disconnect', 'deleteSession'] },
         },
       },
       {
@@ -73,25 +64,25 @@ export class WhatsAppLogin implements INodeType {
         name: 'includeQRImage',
         type: 'boolean',
         default: true,
-        description: 'Whether to include a PNG QR code image as binary data in the output',
+        description: 'Whether to include a PNG QR code image as binary data in the output (only applies to QR authentication)',
         displayOptions: {
-          show: { operation: ['connect'] },
+          show: { operation: ['getCode'] },
         },
       },
       {
-        displayName: 'Wait For QR (seconds)',
-        name: 'waitForQR',
+        displayName: 'Wait For Code (seconds)',
+        name: 'waitForCode',
         type: 'number',
         default: 30,
-        description: 'How long to wait for a QR code to appear before returning. Set 0 to return immediately.',
+        description: 'How long to wait for a QR/pairing code to appear before returning. Set 0 to return immediately.',
         displayOptions: {
-          show: { operation: ['connect'] },
+          show: { operation: ['getCode'] },
         },
       },
       {
         ...BACKEND_OVERRIDE_PROPERTY,
         displayOptions: {
-          show: { operation: ['connect', 'pairingCode', 'status', 'disconnect', 'deleteSession'] },
+          show: { operation: ['getCode', 'status', 'connect', 'disconnect', 'deleteSession'] },
         },
       },
     ],
@@ -135,6 +126,39 @@ export class WhatsAppLogin implements INodeType {
           continue;
         }
 
+        if (operation === 'connect') {
+          // Read current credential settings to determine auth method
+          const credentials = await this.getCredentials('whatsAppSession', i);
+          const authMethod = credentials?.authMethod as 'qr' | 'pairing' | undefined;
+          const pairingPhone = credentials?.pairingPhone as string | undefined;
+
+          console.log(`[WhatsAppLogin] Connecting session with authMethod=${authMethod}, pairingPhone=${pairingPhone}`);
+
+          // Connect session with current credential settings
+          await backend.connect({
+            sessionId,
+            usePairingCode: authMethod === 'pairing',
+            pairingPhone: pairingPhone,
+          });
+
+          // Wait a moment for connection to establish
+          await new Promise(r => setTimeout(r, 2000));
+
+          // Return connection status
+          const info = backend.getSessionInfo(sessionId);
+          returnData.push({
+            json: {
+              sessionId,
+              backend: backendId,
+              connected: info?.connected ?? false,
+              phone: info?.phone,
+              pushName: info?.pushName,
+              message: info?.connected ? 'Session connected successfully' : 'Session initiated, waiting for connection...',
+            } as IDataObject,
+          });
+          continue;
+        }
+
         if (operation === 'disconnect') {
           await backend.disconnect(sessionId);
           returnData.push({ json: { sessionId, backend: backendId, disconnected: true } });
@@ -147,88 +171,153 @@ export class WhatsAppLogin implements INodeType {
           continue;
         }
 
-        if (operation === 'pairingCode') {
-          const phone = this.getNodeParameter('pairingPhone', i) as string;
-          await backend.connect({ sessionId, usePairingCode: true, pairingPhone: phone });
-          let code: string | undefined;
-          for (let t = 0; t < 30; t++) {
-            code = backend.getPairingCode(sessionId);
-            if (code) break;
-            await new Promise(r => setTimeout(r, 1000));
-          }
-          returnData.push({
-            json: {
-              sessionId,
-              backend: backendId,
-              pairingCode: code ?? null,
-              phone,
-              message: code ? 'Enter this code in WhatsApp > Linked Devices > Link a Device' : 'Pairing code not yet generated',
-              // Visible in the n8n UI's output panel — shows exactly what
-              // the socket did (or didn't do) during this attempt, since
-              // server-side console/log output isn't reachable from there.
-              debug: backend.getPairingDebug(sessionId),
-            },
-          });
-          continue;
-        }
-
-        if (operation === 'connect') {
-          const waitSecs = this.getNodeParameter('waitForQR', i, 30) as number;
+        if (operation === 'getCode') {
+          const waitSecs = this.getNodeParameter('waitForCode', i, 30) as number;
           const includeImage = this.getNodeParameter('includeQRImage', i, true) as boolean;
 
-          await backend.connect({ sessionId });
+          // Check if session exists, if not create it using current credential settings
+          let info = backend.getSessionInfo(sessionId);
+          let authMethod: 'qr' | 'pairing' | undefined;
+          let pairingPhone: string | undefined;
 
-          let qr: string | undefined;
+          if (!info) {
+            // Session doesn't exist - need to create it first
+            // Read current credential settings to determine auth method
+            const credentials = await this.getCredentials('whatsAppSession', i);
+            authMethod = credentials?.authMethod as 'qr' | 'pairing' | undefined;
+            pairingPhone = credentials?.pairingPhone as string | undefined;
+
+            console.log(`[WhatsAppLogin] Creating session with authMethod=${authMethod}, pairingPhone=${pairingPhone}`);
+
+            // Create session with current credential settings
+            await backend.connect({
+              sessionId,
+              usePairingCode: authMethod === 'pairing',
+              pairingPhone: pairingPhone,
+            });
+          }
+
+          // If authMethod wasn't determined from credentials (session existed), check metadata
+          if (!authMethod) {
+            const credentials = await this.getCredentials('whatsAppSession', i);
+            authMethod = credentials?.authMethod as 'qr' | 'pairing' | undefined;
+            pairingPhone = credentials?.pairingPhone as string | undefined;
+            console.log(`[WhatsAppLogin] Existing session, authMethod from credentials=${authMethod}, pairingPhone=${pairingPhone}`);
+
+            // For pairing mode, ensure the session is properly connected with a pairing code
+            // If the session was restored by Bootstrap but the pairing code wasn't generated,
+            // we need to reconnect to trigger the pairing code generation
+            if (authMethod === 'pairing' && pairingPhone) {
+              const pollInfo = backend.getSessionInfo(sessionId);
+              if (!pollInfo?.pairingCode && !pollInfo?.connected) {
+                console.log(`[WhatsAppLogin] No pairing code found and not connected, reconnecting with pairing mode...`);
+                await backend.connect({
+                  sessionId,
+                  usePairingCode: true,
+                  pairingPhone: pairingPhone,
+                });
+              }
+            }
+          }
+
+          // Poll for QR/pairing code or connection
+          const qrTimeoutSeconds = 20; // QR codes typically rotate every ~20 seconds
+          let code: string | undefined;
           let connected = false;
           const startMs = Date.now();
           const waitMs = waitSecs * 1000;
 
+          console.log(`[WhatsAppLogin] Polling for code, authMode=${authMethod}, timeout=${waitSecs}s`);
+
+          // Poll for QR/pairing code or connection
           while (Date.now() - startMs < waitMs) {
-            const info = backend.getSessionInfo(sessionId);
-            if (info?.connected) {
+            const pollInfo = backend.getSessionInfo(sessionId);
+            if (pollInfo?.connected) {
               connected = true;
               break;
             }
-            if (info?.qrCode) {
-              qr = info.qrCode;
-              break;
+
+            // In pairing mode, only look for pairing code. In QR mode, only look for QR code.
+            if (authMethod === 'pairing') {
+              if (pollInfo?.pairingCode) {
+                code = pollInfo.pairingCode;
+                console.log(`[WhatsAppLogin] Found pairing code: ${code}`);
+                break;
+              }
+            } else {
+              // Default to QR mode
+              if (pollInfo?.qrCode) {
+                code = pollInfo.qrCode;
+                console.log(`[WhatsAppLogin] Found QR code`);
+                break;
+              }
             }
             await new Promise(r => setTimeout(r, 500));
           }
 
+          // Return connection result
           if (connected) {
-            const info = backend.getSessionInfo(sessionId)!;
+            const finalInfo = backend.getSessionInfo(sessionId)!;
             returnData.push({
               json: {
                 sessionId,
                 backend: backendId,
                 connected: true,
-                phone: info.phone,
-                pushName: info.pushName,
+                phone: finalInfo.phone,
+                pushName: finalInfo.pushName,
                 message: 'Session is already connected',
               },
             });
             continue;
           }
 
+          // Return code for user to complete authentication
+          const finalInfo = backend.getSessionInfo(sessionId);
+          const isPairingCode = authMethod === 'pairing';
+
+          console.log(`[WhatsAppLogin] Returning result: isPairingCode=${isPairingCode}, code=${code ? 'present' : 'missing'}`);
+
           const result: INodeExecutionData = {
             json: {
               sessionId,
               backend: backendId,
               connected: false,
-              qrCode: qr ?? null,
-              message: qr ? 'Scan the QR code with WhatsApp' : 'QR code not yet available, check again shortly',
+              authMethod: isPairingCode ? 'pairing' : 'qr',
+              // Include timeout information
+              codeTimeoutSeconds: qrTimeoutSeconds,
+              codeExpiresAt: new Date(Date.now() + qrTimeoutSeconds * 1000).toISOString(),
             },
           };
 
-          if (qr && includeImage) {
-            try {
-              const qrBuf = backendId === 'official' ? await officialGenerateQRBuffer(qr) : await legacyGenerateQRBuffer(qr);
-              result.binary = {
-                qrImage: await this.helpers.prepareBinaryData(qrBuf, `qr_${sessionId}.bmp`, 'image/bmp'),
-              };
-            } catch {
-              /* non-critical */
+          if (isPairingCode) {
+            result.json = {
+              ...result.json,
+              pairingCode: code ?? null,
+              phone: finalInfo?.phone,
+              message: code
+                ? `Enter this code in WhatsApp > Linked Devices > Link a Device. Code expires in ${qrTimeoutSeconds} seconds.`
+                : 'Pairing code not yet generated, check again shortly',
+              debug: backend.getPairingDebug(sessionId),
+            };
+          } else {
+            result.json = {
+              ...result.json,
+              qrCode: code ?? null,
+              message: code
+                ? `Scan the QR code with WhatsApp. Code expires in ${qrTimeoutSeconds} seconds.`
+                : 'QR code not yet available, check again shortly',
+            };
+
+            // Include QR image only if code exists AND image is requested AND we're in QR mode
+            if (code && includeImage && !isPairingCode) {
+              try {
+                const qrBuf = backendId === 'official' ? await officialGenerateQRBuffer(code) : await legacyGenerateQRBuffer(code);
+                result.binary = {
+                  qrImage: await this.helpers.prepareBinaryData(qrBuf, `qr_${sessionId}.bmp`, 'image/bmp'),
+                };
+              } catch {
+                /* non-critical */
+              }
             }
           }
 

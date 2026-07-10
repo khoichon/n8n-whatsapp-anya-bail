@@ -62,7 +62,8 @@ export type WhatsAppEventName =
   | 'groups.update'
   | 'group-participants.update'
   | 'call'
-  | 'blocklist.update';
+  | 'blocklist.update'
+  | 'lid-mapping.update';
 
 export type EventSubscriber = (data: unknown) => void | Promise<void>;
 

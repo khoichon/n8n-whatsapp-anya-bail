@@ -156,7 +156,18 @@ export class SessionManager {
     for (const id of ids) {
       if (sessionExists(id)) {
         try {
-          await this.create({ sessionId: id });
+          // Load saved authentication preferences from metadata
+          const meta = this.metadata.get(id);
+          if (meta && (meta.authMethod === 'pairing' || meta.authMethod === 'qr')) {
+            // Auto-login with saved authentication preferences
+            await this.create({
+              sessionId: id,
+              usePairingCode: meta.authMethod === 'pairing',
+              pairingPhone: meta.pairingPhone,
+            });
+          }
+          // If no auth preferences saved, skip auto-login
+          // The WhatsAppLogin node will create the session on-demand using current credential settings
         } catch (err) {
           new SessionLogger(id).error('restoreAll: failed to restore', err);
         }
@@ -205,6 +216,13 @@ export class SessionManager {
     sessionState.pairingCode = undefined;
     sessionState.pairingDebug = [];
 
+    // Save authentication preferences to metadata for auto-initialization on boot
+    const authMethod = usePairingCode ? 'pairing' : 'qr';
+    this.metadata.update(sessionId, {
+      authMethod,
+      pairingPhone: usePairingCode ? pairingPhone : undefined,
+    });
+
     if (usePairingCode) {
       this._debug(
         sessionState,
@@ -250,11 +268,14 @@ export class SessionManager {
       }
 
       if (qr) {
-        sessionState.qrCode = qr;
-        try {
-          sessionState.qrImagePath = await generateQRImage(qr, sessionId);
-        } catch { /* non-critical */ }
-        logger.info('QR code generated');
+        // In pairing code mode, don't save QR code - only request pairing code
+        if (!usePairingCode) {
+          sessionState.qrCode = qr;
+          try {
+            sessionState.qrImagePath = await generateQRImage(qr, sessionId);
+          } catch { /* non-critical */ }
+          logger.info('QR code generated');
+        }
 
         // Matches upstream Baileys' own reference usage (Example/example.ts):
         // requestPairingCode() must be called after the socket has produced

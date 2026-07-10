@@ -14,7 +14,7 @@ export const QR_TIMEOUT_MS = 60000;
 export const PAIRING_CODE_TIMEOUT_MS = 120000;
 export const SESSION_PING_INTERVAL_MS = 30000;
 
-export const DEFAULT_BROWSER: [string, string, string] = ['n8n-baileys', 'Chrome', '120.0.0'];
+export const DEFAULT_BROWSER: [string, string, string] = ['Chrome', 'Windows', '10.0'];
 
 export const SUPPORTED_EVENTS = [
   'messages.upsert',

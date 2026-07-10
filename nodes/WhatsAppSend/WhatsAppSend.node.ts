@@ -421,7 +421,7 @@ export class WhatsAppSend implements INodeType {
           const msgId = this.getNodeParameter('targetMessageId', i) as string;
           const msgJid = this.getNodeParameter('targetMessageJid', i) as string;
           const fromMe = this.getNodeParameter('targetFromMe', i) as boolean;
-          const participant = this.getNodeParameter('targetParticipantId') as string;
+          const participant = this.getNodeParameter('targetParticipantId', i) as string;
           await sock.sendMessage(msgJid, { delete: { id: msgId, remoteJid: msgJid, participant, fromMe } });
           returnData.push({ json: { success: true, operation, messageId: msgId } });
           continue;
